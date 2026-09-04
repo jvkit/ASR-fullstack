@@ -1,10 +1,13 @@
 """REST API：会议查询与纪要导出（供 OA / 前端调用）。"""
 
 import json
+from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import FileResponse
 from sqlalchemy import select
 
+from app.config import settings
 from app.db.database import SessionLocal
 from app.db.models import Meeting, Summary, Utterance
 
@@ -46,12 +49,27 @@ async def meeting_detail(meeting_id: str) -> dict:
             "started_at": meeting.started_at.isoformat() if meeting.started_at else None,
             "ended_at": meeting.ended_at.isoformat() if meeting.ended_at else None,
             "attributes": json.loads(meeting.attributes or "[]"),
+            # 有录音文件才有回放地址
+            "audio_url": (
+                f"/api/meetings/{meeting_id}/audio"
+                if (Path(settings.recordings_dir) / f"{meeting_id}.wav").is_file()
+                else None
+            ),
             "utterances": [
                 {"seq": u.seq, "speaker": u.speaker, "text": u.text,
                  "start_ms": u.start_ms, "end_ms": u.end_ms}
                 for u in utts
             ],
         }
+
+
+@router.get("/meetings/{meeting_id}/audio")
+async def meeting_audio(meeting_id: str) -> FileResponse:
+    """会议录音回放（wav，16kHz/16bit/mono）。"""
+    path = Path(settings.recordings_dir) / f"{meeting_id}.wav"
+    if not path.is_file():
+        raise HTTPException(404, "recording not found")
+    return FileResponse(path, media_type="audio/wav", filename=f"{meeting_id}.wav")
 
 
 @router.get("/meetings/{meeting_id}/summaries")

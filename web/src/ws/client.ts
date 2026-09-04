@@ -26,8 +26,10 @@ export class MeetingWs {
     return this.ws?.readyState === WebSocket.OPEN
   }
 
-  start(title: string): void {
-    this.ws?.send(JSON.stringify({ type: 'start', title }))
+  start(title: string, spkThreshold?: number): void {
+    const payload: Record<string, unknown> = { type: 'start', title }
+    if (spkThreshold !== undefined) payload.spk_threshold = spkThreshold
+    this.ws?.send(JSON.stringify(payload))
   }
 
   sendPcm(bytes: ArrayBuffer): void {

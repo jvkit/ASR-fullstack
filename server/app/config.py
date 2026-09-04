@@ -32,6 +32,7 @@ class Settings(BaseSettings):
     server_host: str = "0.0.0.0"
     server_port: int = 8000
     database_url: str = "sqlite+aiosqlite:///./meeting.db"
+    recordings_dir: str = "./recordings"    # 会议录音 wav 存放目录
 
     # 总结调度
     summary_interval_sec: int = 60       # 定时总结间隔（秒）

@@ -63,10 +63,12 @@ class FunasrClient:
         self._closed = False
         self._finished = False  # 是否已发送 is_speaking=false
 
-    async def start(self) -> None:
+    async def start(self, extra_config: dict | None = None) -> None:
         config = dict(DEFAULT_CONFIG)
         if self.hotwords:
             config["hotwords"] = self.hotwords
+        if extra_config:
+            config.update(extra_config)
         await self._connect(json.dumps(config, ensure_ascii=False))
 
     async def _connect(self, config_msg: str) -> None:

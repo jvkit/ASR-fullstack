@@ -19,3 +19,7 @@ meeting.db-journal
 # OS
 .DS_Store
 Thumbs.db
+
+# 会议录音
+server/recordings/
+scripts/wavs/

@@ -15,7 +15,7 @@ from pathlib import Path
 import websockets
 
 CHUNK = 3200
-EX = Path("/home/bo1/.cache/modelscope/models/iic--speech_campplus_sv_zh-cn_16k-common/snapshots/master/examples")
+EX = Path(__file__).parent / "wavs"
 
 
 def load_pcm(path: Path) -> bytes:
@@ -54,7 +54,7 @@ async def main() -> None:
     ssl_ctx.verify_mode = ssl.CERT_NONE
     results: list = []
     async with websockets.connect(
-        "wss://127.0.0.1:10095", subprotocols=["binary"], ssl=ssl_ctx, max_queue=64,
+        "wss://192.168.30.87:10095", subprotocols=["binary"], ssl=ssl_ctx, max_queue=64,
     ) as ws:
         # 注意 server 只对 wss 严格，ws 本机也通（前面测试过）；若拒则换 wss
         await send_utterance(ws, EX / "speaker1_a_cn_16k.wav", "A1", results)

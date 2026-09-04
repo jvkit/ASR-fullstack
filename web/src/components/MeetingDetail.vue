@@ -17,6 +17,7 @@ const emit = defineEmits<{ back: [] }>()
 const title = ref('')
 const attrs = ref<Attr[]>([])
 const startedAt = ref('')
+const audioUrl = ref('')
 const utterances = ref<Utterance[]>([])
 const summaries = ref<SummaryRow[]>([])
 const loading = ref(true)
@@ -40,6 +41,7 @@ async function load() {
     title.value = detail.title
     attrs.value = detail.attributes || []
     startedAt.value = detail.started_at || ''
+    audioUrl.value = detail.audio_url || ''
     utterances.value = detail.utterances || []
     summaries.value = (sumResp as SummaryRow[]) || []
   } finally {
@@ -89,6 +91,10 @@ async function downloadMarkdown() {
           {{ a.value }}
         </el-descriptions-item>
       </el-descriptions>
+
+      <h4 style="margin: 16px 0 8px">录音回放</h4>
+      <audio v-if="audioUrl" controls :src="audioUrl" style="width: 100%; margin-bottom: 8px"></audio>
+      <el-text v-else type="info" size="small">本场会议无录音（老会议或录音未落盘）</el-text>
 
       <h4 style="margin: 16px 0 8px">逐句转写</h4>
       <div v-for="u in utterances" :key="u.seq" style="margin-bottom: 8px">

@@ -90,7 +90,7 @@ function handleMessage(msg: ServerMessage) {
   }
 }
 
-async function onStart(payload: { title: string }) {
+async function onStart(payload: { title: string; spkThreshold: number }) {
   errorMsg.value = ''
   utterances.value = []
   summaries.value = []
@@ -104,7 +104,7 @@ async function onStart(payload: { title: string }) {
   await mic.start((bytes) => {
     if (ws.ready && !paused.value) ws.sendPcm(bytes)
   })
-  ws.start(payload.title)
+  ws.start(payload.title, payload.spkThreshold)
   recording.value = true
 }
 

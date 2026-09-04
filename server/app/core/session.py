@@ -52,6 +52,8 @@ class MeetingSession:
         self.paused = False  # 前端暂停：丢弃上行音频（连接保持）
         self.final_title = ""
         self.final_attributes: list[dict] = []  # 累积的事实性属性（key 去重合并）
+        self.spk_threshold: float = 0.55  # 说话人聚类阈值，前端可调
+        self._audio = bytearray()  # 累计上行 PCM（int16/16kHz/mono），结束时写 wav
 
     # ---------- 生命周期 ----------
 
@@ -59,7 +61,7 @@ class MeetingSession:
         async with SessionLocal() as db:
             db.add(Meeting(id=self.meeting_id, title=self.title, recorder=self.recorder))
             await db.commit()
-        await self.asr.start()
+        await self.asr.start({"spk_threshold": self.spk_threshold})
         self.scheduler.start()
         logger.info("meeting %s started", self.meeting_id)
 
@@ -80,6 +82,8 @@ class MeetingSession:
         await self.scheduler.stop(final_summary=True)
 
         # scheduler 收尾会触发属性提取，final_title/final_attributes 已填充
+        self._save_recording()
+
         async with SessionLocal() as db:
             meeting = await db.get(Meeting, self.meeting_id)
             if meeting:
@@ -98,6 +102,7 @@ class MeetingSession:
     async def handle_audio(self, pcm: bytes) -> None:
         if self._stopped or self.paused:
             return
+        self._audio.extend(pcm)
         await self.asr.send_audio(pcm)
 
     # ---------- ASR 回调 ----------
@@ -142,6 +147,27 @@ class MeetingSession:
         self._asr_closed.set()
 
     # ---------- 总结 ----------
+
+    def _save_recording(self) -> None:
+        """把累计的 PCM 写成 wav（16kHz/int16/mono，与上行音频一致）。"""
+        if not self._audio:
+            return
+        try:
+            import wave
+            from pathlib import Path
+
+            out_dir = Path(settings.recordings_dir)
+            out_dir.mkdir(parents=True, exist_ok=True)
+            out_path = out_dir / f"{self.meeting_id}.wav"
+            with wave.open(str(out_path), "wb") as wf:
+                wf.setnchannels(1)
+                wf.setsampwidth(2)
+                wf.setframerate(16000)
+                wf.writeframes(bytes(self._audio))
+            logger.info("meeting %s recording saved: %s (%.1f min)",
+                        self.meeting_id, out_path, len(self._audio) / 32000 / 60)
+        except Exception:
+            logger.exception("meeting %s save recording failed", self.meeting_id)
 
     async def extract_attributes(self, text: str) -> None:
         """对新增转写文本提取事实性属性，合并进 final_attributes 并广播给前端。"""

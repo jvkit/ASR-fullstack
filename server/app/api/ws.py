@@ -2,7 +2,7 @@
 
 协议：
     客户端第一条消息（JSON 文本）：
-        {"type": "start", "title": "周会", "recorder": "张三"}
+        {"type": "start", "title": "周会", "spk_threshold": 0.55}
     之后：
         二进制帧      → PCM int16 16kHz 音频块
         {"type":"stop"} → 结束会议
@@ -48,6 +48,13 @@ async def meeting_ws(ws: WebSocket) -> None:
             title=str(ctrl.get("title") or "未命名会议"),
             recorder=str(ctrl.get("recorder") or ""),
         )
+        # 说话人聚类阈值（前端可调）：透传给 FunASR 服务端
+        try:
+            thr = float(ctrl.get("spk_threshold") or 0)
+            if 0 < thr < 1:
+                session.spk_threshold = thr
+        except (TypeError, ValueError):
+            pass
         session.clients.add(ws)
         await session.start()
         await ws.send_text(json.dumps({"type": "started", "meeting_id": session.meeting_id}))
@@ -84,8 +91,9 @@ async def meeting_ws(ws: WebSocket) -> None:
             pass
     finally:
         if session:
-            session.clients.discard(ws)
+            # 先收尾（最终转写/总结/ended 还要广播给这个客户端），再摘除连接
             await session.stop()
+            session.clients.discard(ws)
             session_manager.remove(session.meeting_id)
         try:
             await ws.close()
