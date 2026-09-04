@@ -1,0 +1,30 @@
+[project]
+name = "meeting-asr"
+version = "0.1.0"
+description = "实时会议转写与滚动纪要系统（FunASR + 本地 LLM）"
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "websockets>=12",
+    "openai>=1.50",
+    "langfuse>=2.50",
+    "sqlalchemy>=2.0",
+    "pydantic>=2.9",
+    "pydantic-settings>=2.5",
+    "aiosqlite>=0.20",
+    "python-multipart>=0.0.9",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.6",
+]
+
+[tool.ruff]
+line-length = 110
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "ASYNC"]
