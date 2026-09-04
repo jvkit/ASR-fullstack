@@ -40,5 +40,10 @@ class Settings(BaseSettings):
     summary_max_chars: int = 1500        # 单次送入 LLM 的文本上限（字）
     attr_trigger_chars: int = 800        # 属性提取触发阈值（字）
 
+    # VAD 激进切分（发给 gpu FunASR，按连接生效；改后新会议即生效，无需重启 gpu）
+    vad_max_end_silence_ms: int = 350    # 静音多久判"说完"（原模型默认 800，正常换气约 300-600ms）
+    vad_max_segment_sec: int = 8         # 单段最长秒数，超时强制切（原模型默认 60，长段必混多人）
+    spk_min_seg_sec: float = 1.0         # 短于此秒数的段不做声纹（碎段 embedding 不稳）
+
 
 settings = Settings()

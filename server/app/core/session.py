@@ -61,7 +61,12 @@ class MeetingSession:
         async with SessionLocal() as db:
             db.add(Meeting(id=self.meeting_id, title=self.title, recorder=self.recorder))
             await db.commit()
-        await self.asr.start({"spk_threshold": self.spk_threshold})
+        await self.asr.start({
+            "spk_threshold": self.spk_threshold,
+            "vad_max_end_silence_ms": settings.vad_max_end_silence_ms,
+            "vad_max_segment_sec": settings.vad_max_segment_sec,
+            "spk_min_seg_sec": settings.spk_min_seg_sec,
+        })
         self.scheduler.start()
         logger.info("meeting %s started", self.meeting_id)
 
