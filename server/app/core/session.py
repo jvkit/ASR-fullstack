@@ -18,7 +18,7 @@ from fastapi import WebSocket
 from app.config import settings
 from app.core.asr_client import FunasrClient
 from app.core.segment import UtteranceBuffer
-from app.core.summarizer import SummaryTrigger
+from app.core.summarizer import SummaryScheduler
 from app.db.database import SessionLocal
 from app.db.models import Meeting, Summary, Utterance
 from app.llm import client as llm_client
@@ -47,11 +47,11 @@ class MeetingSession:
             on_error=self._on_asr_error,
             on_closed=self._on_asr_closed,
         )
-        self.scheduler = SummaryTrigger(self)
+        self.scheduler = SummaryScheduler(self)
 
         self.paused = False  # 前端暂停：丢弃上行音频（连接保持）
         self.final_title = ""
-        self.final_attributes: list[dict] = []
+        self.final_attributes: list[dict] = []  # 累积的事实性属性（key 去重合并）
 
     # ---------- 生命周期 ----------
 
@@ -76,15 +76,10 @@ class MeetingSession:
         except (TimeoutError, asyncio.TimeoutError):
             logger.warning("meeting %s: asr close timeout", self.meeting_id)
 
-        # 全文提取最终主题 + 动态属性（事实性，失败不阻塞收尾）
-        full_text = await self.buffer.full_text()
-        if full_text:
-            attr_result = await llm_client.extract_final_attributes(full_text)
-            self.final_title = attr_result["title"]
-            self.final_attributes = attr_result["attributes"]
-
+        # 收尾：最终总结 + 剩余尾巴属性提取（scheduler.stop 里做了），最后落库 title/attributes
         await self.scheduler.stop(final_summary=True)
 
+        # scheduler 收尾会触发属性提取，final_title/final_attributes 已填充
         async with SessionLocal() as db:
             meeting = await db.get(Meeting, self.meeting_id)
             if meeting:
@@ -148,9 +143,31 @@ class MeetingSession:
 
     # ---------- 总结 ----------
 
+    async def extract_attributes(self, text: str) -> None:
+        """对新增转写文本提取事实性属性，合并进 final_attributes 并广播给前端。"""
+        if not text.strip():
+            return
+        result = await llm_client.extract_final_attributes(text)
+        if result["title"] and not self.final_title:
+            self.final_title = result["title"]  # 第一次拿到主题就定住，后续覆盖需手动
+        merged: dict[str, str] = {a["key"]: a["value"] for a in self.final_attributes}
+        for a in result["attributes"]:
+            if isinstance(a, dict) and a.get("key"):
+                merged[str(a["key"])] = str(a.get("value", ""))
+        self.final_attributes = [{"key": k, "value": v} for k, v in merged.items()]
+
+        # 实时广播最新属性（前端会议信息区即时渲染）
+        await self.broadcast({
+            "type": "attributes",
+            "title": self.final_title,
+            "attributes": self.final_attributes,
+        })
+
     async def run_summary(self, final: bool) -> None:
-        # 非结束时的字数触发已由 trigger 按阈值保证；这里兜底空缓冲就跳过
+        # 非结束时句子太少就攒着，避免碎窗口浪费 LLM 调用
         if await self.buffer.pending_count() == 0:
+            return
+        if not final and await self.buffer.pending_count() < settings.summary_min_utterances:
             return
         window_text = await self.buffer.drain_text(settings.summary_max_chars)
 

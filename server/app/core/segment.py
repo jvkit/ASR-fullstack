@@ -17,9 +17,13 @@ class UtteranceItem:
 
 @dataclass
 class UtteranceBuffer:
-    """append-only 句子缓冲，draiｎ语义：取走即消费。"""
+    """append-only 句子缓冲：
+    - _items：待总结窗口（drain 消费）
+    - _all：会议全量累积（属性提取用，drain 不影响）
+    """
 
     _items: list[UtteranceItem] = field(default_factory=list)
+    _all: list[UtteranceItem] = field(default_factory=list)
     _next_seq: int = 1
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
@@ -28,6 +32,7 @@ class UtteranceBuffer:
             item = UtteranceItem(self._next_seq, speaker, text, start_ms, end_ms)
             self._next_seq += 1
             self._items.append(item)
+            self._all.append(item)
             return item
 
     async def drain(self) -> list[UtteranceItem]:
@@ -46,15 +51,25 @@ class UtteranceBuffer:
         async with self._lock:
             return len(self._items)
 
-    async def pending_chars(self) -> int:
-        """当前缓冲的字符总量（字数触发总结用）。"""
+    async def total_chars(self) -> int:
+        """会议全量累计字符量（仅统计）。"""
         async with self._lock:
-            return sum(len(it.text) for it in self._items)
+            return sum(len(it.text) for it in self._all)
 
-    async def full_text(self, max_chars: int = 100000) -> str:
-        """从头到尾的全文（不消费），结束时整体提取属性用。"""
+    async def text_from(self, item_seq: int) -> str:
+        """seq > item_seq 的所有句子（属性提取用，不消费，按句子游标避免字符错位）。"""
         async with self._lock:
-            lines = [f"{it.speaker or '发言人'}: {it.text}" for it in self._items]
+            lines = [f"{it.speaker or '发言人'}: {it.text}" for it in self._all if it.seq > item_seq]
+            return "\n".join(lines)
+
+    async def last_seq(self) -> int:
+        async with self._lock:
+            return self._all[-1].seq if self._all else 0
+
+    async def full_text(self, max_chars: int = 200000) -> str:
+        """会议全量文本（不消费，含已被总结消费的句子）。"""
+        async with self._lock:
+            lines = [f"{it.speaker or '发言人'}: {it.text}" for it in self._all]
             return "\n".join(lines)[:max_chars]
 
     async def drain_text(self, max_chars: int) -> str:

@@ -36,6 +36,7 @@ const meetingId = ref('')
 const onlineText = ref('') // 流式临时字幕
 const utterances = ref<Utterance[]>([])
 const summaries = ref<SummaryItem[]>([])
+const liveAttrs = ref<{ key: string; value: string }[]>([]) // 实时提取的事实性属性
 const errorMsg = ref('')
 
 const mic = reactive(new MicRecorder())
@@ -75,6 +76,9 @@ function handleMessage(msg: ServerMessage) {
         final: msg.final,
       })
       break
+    case 'attributes':
+      liveAttrs.value = msg.attributes || []
+      break
     case 'ended':
       recording.value = false
       paused.value = false
@@ -91,6 +95,7 @@ async function onStart(payload: { title: string }) {
   utterances.value = []
   summaries.value = []
   onlineText.value = ''
+  liveAttrs.value = []
   speakerColorMap.clear()
 
   await ws.connect()
@@ -118,7 +123,9 @@ async function onResume() {
 async function onStop() {
   ws.stop()
   await mic.stop()
-  // 等服务端 ended 消息把 recording 置 false
+  // 立即切回「开始记录」，不等服务端 ended（服务端还要 flush + 最终总结，可能十几秒）
+  recording.value = false
+  paused.value = false
 }
 
 function openDetail(id: string) {
@@ -150,6 +157,17 @@ function openDetail(id: string) {
       <!-- 实时记录视图 -->
       <template v-if="view === 'live'">
         <Recorder :recording="recording" :paused="paused" @start="onStart" @pause="onPause" @resume="onResume" @stop="onStop" />
+
+        <div v-if="liveAttrs.length" style="margin-top: 12px">
+          <el-tag
+            v-for="a in liveAttrs"
+            :key="a.key"
+            effect="plain"
+            style="margin-right: 8px"
+          >
+            {{ a.key }}：{{ a.value }}
+          </el-tag>
+        </div>
 
         <el-row :gutter="16" style="margin-top: 16px">
           <el-col :span="14">

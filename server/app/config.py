@@ -34,9 +34,10 @@ class Settings(BaseSettings):
     database_url: str = "sqlite+aiosqlite:///./meeting.db"
 
     # 总结调度
-    summary_interval_sec: int = 60
-    summary_min_utterances: int = 3
-    summary_max_chars: int = 1500
+    summary_interval_sec: int = 60       # 定时总结间隔（秒）
+    summary_min_utterances: int = 3      # 窗口内最少句子数，不足则跳过
+    summary_max_chars: int = 1500        # 单次送入 LLM 的文本上限（字）
+    attr_trigger_chars: int = 800        # 属性提取触发阈值（字）
 
 
 settings = Settings()
