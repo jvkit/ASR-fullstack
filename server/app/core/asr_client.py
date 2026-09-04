@@ -20,7 +20,7 @@ import websockets
 logger = logging.getLogger(__name__)
 
 OnlineCallback = Callable[[str], Awaitable[None]]
-OfflineCallback = Callable[[str, list, int | None], Awaitable[None]]
+OfflineCallback = Callable[[str, list, str | None], Awaitable[None]]
 ErrorCallback = Callable[[str], Awaitable[None]]
 ClosedCallback = Callable[[], Awaitable[None]]
 

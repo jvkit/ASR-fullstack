@@ -93,9 +93,10 @@ class MeetingSession:
         """流式临时字幕：立即广播，前端标注「识别中」。"""
         await self.broadcast({"type": "transcript_online", "text": text})
 
-    async def _on_asr_offline(self, text: str, timestamp: list, spk: int | None) -> None:
+    async def _on_asr_offline(self, text: str, timestamp: list, spk: str | None) -> None:
         """句终确定结果：带说话人/时间戳，进缓冲 + 落库 + 广播。"""
-        speaker = f"spk{spk}" if spk is not None else ""
+        # FunASR 2pass-offline 返回 spk_name：注册声纹名 / 匿名"说话人1" / "unknown"
+        speaker = "" if not spk or spk == "unknown" else spk
         start_ms = int(timestamp[0][0]) if timestamp else 0
         end_ms = int(timestamp[-1][1]) if timestamp else 0
 
