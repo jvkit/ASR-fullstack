@@ -5,6 +5,7 @@ import LiveTranscript from './components/LiveTranscript.vue'
 import MeetingDetail from './components/MeetingDetail.vue'
 import MeetingList from './components/MeetingList.vue'
 import Recorder from './components/Recorder.vue'
+import SpeakerManage from './components/SpeakerManage.vue'
 import SummaryPanel from './components/SummaryPanel.vue'
 import { MicRecorder } from './ws/audio'
 import { MeetingWs, type ServerMessage } from './ws/client'
@@ -24,7 +25,7 @@ interface SummaryItem {
   final: boolean
 }
 
-type View = 'live' | 'list' | 'detail'
+type View = 'live' | 'list' | 'detail' | 'speakers'
 
 const view = ref<View>('live')
 const detailMeetingId = ref('')
@@ -140,6 +141,7 @@ function openDetail(id: string) {
       <h2 style="margin: 0">会议实时纪要</h2>
       <el-radio-group v-model="view" size="default">
         <el-radio-button value="live">实时记录</el-radio-button>
+        <el-radio-button value="speakers">声纹管理</el-radio-button>
         <el-radio-button value="list">
           <el-badge :value="meetingCount" :hidden="!meetingCount" :offset="[-4, 2]">历史会议</el-badge>
         </el-radio-button>
@@ -186,6 +188,9 @@ function openDetail(id: string) {
 
       <!-- 历史会议列表 -->
       <MeetingList v-else-if="view === 'list'" @open="openDetail" />
+
+      <!-- 声纹管理 -->
+      <SpeakerManage v-else-if="view === 'speakers'" />
 
       <!-- 会议详情 -->
       <MeetingDetail
