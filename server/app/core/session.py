@@ -18,7 +18,7 @@ from fastapi import WebSocket
 from app.config import settings
 from app.core.asr_client import FunasrClient
 from app.core.segment import UtteranceBuffer
-from app.core.summarizer import SummaryScheduler
+from app.core.summarizer import SummaryTrigger
 from app.db.database import SessionLocal
 from app.db.models import Meeting, Summary, Utterance
 from app.llm import client as llm_client
@@ -47,7 +47,11 @@ class MeetingSession:
             on_error=self._on_asr_error,
             on_closed=self._on_asr_closed,
         )
-        self.scheduler = SummaryScheduler(self)
+        self.scheduler = SummaryTrigger(self)
+
+        self.paused = False  # 前端暂停：丢弃上行音频（连接保持）
+        self.final_title = ""
+        self.final_attributes: list[dict] = []
 
     # ---------- 生命周期 ----------
 
@@ -72,6 +76,13 @@ class MeetingSession:
         except (TimeoutError, asyncio.TimeoutError):
             logger.warning("meeting %s: asr close timeout", self.meeting_id)
 
+        # 全文提取最终主题 + 动态属性（事实性，失败不阻塞收尾）
+        full_text = await self.buffer.full_text()
+        if full_text:
+            attr_result = await llm_client.extract_final_attributes(full_text)
+            self.final_title = attr_result["title"]
+            self.final_attributes = attr_result["attributes"]
+
         await self.scheduler.stop(final_summary=True)
 
         async with SessionLocal() as db:
@@ -79,12 +90,19 @@ class MeetingSession:
             if meeting:
                 meeting.status = "ended"
                 meeting.ended_at = datetime.now()
+                # AI 归纳的主题覆盖手填标题；空则保留原值
+                if self.final_title:
+                    meeting.title = self.final_title
+                if self.final_attributes:
+                    meeting.attributes = json.dumps(self.final_attributes, ensure_ascii=False)
                 await db.commit()
 
         await self.broadcast({"type": "ended", "meeting_id": self.meeting_id})
         logger.info("meeting %s ended", self.meeting_id)
 
     async def handle_audio(self, pcm: bytes) -> None:
+        if self._stopped or self.paused:
+            return
         await self.asr.send_audio(pcm)
 
     # ---------- ASR 回调 ----------
@@ -131,11 +149,8 @@ class MeetingSession:
     # ---------- 总结 ----------
 
     async def run_summary(self, final: bool) -> None:
-        # 先预览：非结束时句子太少就攒着，避免碎窗口浪费 LLM 调用
-        pending = await self.buffer.peek_text(settings.summary_max_chars)
-        if not pending:
-            return
-        if not final and await self.buffer.pending_count() < settings.summary_min_utterances:
+        # 非结束时的字数触发已由 trigger 按阈值保证；这里兜底空缓冲就跳过
+        if await self.buffer.pending_count() == 0:
             return
         window_text = await self.buffer.drain_text(settings.summary_max_chars)
 
@@ -155,6 +170,7 @@ class MeetingSession:
                 window_text=window_text,
                 content="\n".join(f"· {p}" for p in result["points"]),
                 action_items=json.dumps(result["action_items"], ensure_ascii=False),
+                attributes=json.dumps(result["attributes"], ensure_ascii=False),
                 title=result["title"],
             ))
             await db.commit()
@@ -166,6 +182,7 @@ class MeetingSession:
             "title": result["title"],
             "points": result["points"],
             "action_items": result["action_items"],
+            "attributes": result["attributes"],
         })
 
     # ---------- 广播 ----------

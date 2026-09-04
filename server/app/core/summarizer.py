@@ -1,4 +1,4 @@
-"""定时总结调度器：每 N 秒把积累的句子送给 LLM 做滚动总结。"""
+"""字数触发总结器：缓冲句子达到阈值（或结束时）触发一次总结。"""
 
 from __future__ import annotations
 
@@ -10,34 +10,36 @@ from app.config import settings
 logger = logging.getLogger(__name__)
 
 
-class SummaryScheduler:
+class SummaryTrigger:
     """挂在一个 MeetingSession 上的后台任务。
 
-    一期策略：固定间隔窗口（SUMMARY_INTERVAL_SEC）。
-    二期可替换为「静音边界 + LLM 话题判断」的三层边界检测，
-    接口不变：都是触发 session.run_summary()。
+    策略：缓冲区达到 summary_max_chars 字数（由 buffer 内部累计触发信号）
+    或结束时强制触发。触发即调 session.run_summary(final=...)，
+    得到摘要后立即消费清空缓冲——不做滚动累积，只取当段原文给 LLM。
     """
 
-    def __init__(self, session: "MeetingSession") -> None:  # noqa: F821 - 前向引用
+    def __init__(self, session: "MeetingSession") -> None:  # noqa: F821
         self._session = session
         self._task: asyncio.Task | None = None
         self._stopped = asyncio.Event()
+        self._threshold = settings.summary_max_chars
 
     def start(self) -> None:
         self._task = asyncio.get_running_loop().create_task(self._loop())
 
     async def _loop(self) -> None:
-        interval = settings.summary_interval_sec
         while not self._stopped.is_set():
             try:
-                await asyncio.wait_for(self._stopped.wait(), timeout=interval)
-                break  # 被 stop() 唤醒
+                await asyncio.wait_for(self._stopped.wait(), timeout=2.0)
+                break
             except (TimeoutError, asyncio.TimeoutError):
                 pass
             try:
-                await self._session.run_summary(final=False)
+                n = await self._session.buffer.pending_chars()
+                if n >= self._threshold:
+                    await self._session.run_summary(final=False)
             except Exception:
-                logger.exception("periodic summary failed")
+                logger.exception("char-triggered summary failed")
 
     async def stop(self, final_summary: bool = True) -> None:
         self._stopped.set()

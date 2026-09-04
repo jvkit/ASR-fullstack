@@ -41,9 +41,9 @@ client = OpenAI(
 
 
 async def summarize_window(prev_summary: str, window_text: str) -> dict:
-    """滚动总结一个窗口的转写文本。
+    """总结一个窗口的转写文本。
 
-    返回 {"title": str, "points": list[str], "action_items": list[dict]}
+    返回 {"title": str, "points": list[str], "action_items": list[dict], "attributes": list[dict]}
     解析失败时返回兜底结构，绝不向上抛异常（总结不能打断会议）。
     """
     messages = prompts.build_summary_messages(prev_summary, window_text)
@@ -62,7 +62,36 @@ async def summarize_window(prev_summary: str, window_text: str) -> dict:
             "title": str(data.get("title", "")),
             "points": [str(p) for p in data.get("points", [])],
             "action_items": data.get("action_items", []),
+            "attributes": data.get("attributes", []),
         }
     except Exception:
         logger.exception("summarize_window failed")
-        return {"title": "", "points": [], "action_items": []}
+        return {"title": "", "points": [], "action_items": [], "attributes": []}
+
+
+async def extract_final_attributes(full_text: str) -> dict:
+    """会议结束时对全文提取主题 + 动态属性（事实性，供详情页渲染）。
+
+    返回 {"title": str, "attributes": list[{"key","value"}]}
+    """
+    if not full_text.strip():
+        return {"title": "", "attributes": []}
+    messages = prompts.build_final_attributes_messages(full_text)
+    try:
+        resp = await asyncio.to_thread(
+            client.chat.completions.create,
+            model=settings.llm_model,
+            messages=messages,  # type: ignore[arg-type]
+            temperature=0.2,
+            response_format={"type": "json_object"},
+        )
+        raw = resp.choices[0].message.content or "{}"
+        data = json.loads(raw)
+        return {
+            "title": str(data.get("title", "")),
+            "attributes": data.get("attributes", []),
+        }
+    except Exception:
+        logger.exception("extract_final_attributes failed")
+        return {"title": "", "attributes": []}
+

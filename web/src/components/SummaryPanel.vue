@@ -4,6 +4,7 @@ interface SummaryItem {
   title: string
   points: string[]
   actionItems: { who: string; what: string; due?: string; status?: string }[]
+  attributes: { key: string; value: string }[]
   final: boolean
 }
 
@@ -43,6 +44,17 @@ async function copyReport(meetingId: string) {
           <ul style="margin: 0; padding-left: 18px">
             <li v-for="(p, i) in s.points" :key="i">{{ p }}</li>
           </ul>
+          <div v-if="s.attributes.length" style="margin-top: 6px">
+            <el-tag
+              v-for="a in s.attributes"
+              :key="a.key"
+              size="small"
+              effect="plain"
+              style="margin-right: 6px"
+            >
+              {{ a.key }}：{{ a.value }}
+            </el-tag>
+          </div>
           <div v-if="s.actionItems.length" style="margin-top: 6px">
             <el-tag
               v-for="(a, i) in s.actionItems"

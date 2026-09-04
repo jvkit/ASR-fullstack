@@ -15,10 +15,12 @@ class Meeting(Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)  # uuid
     title: Mapped[str] = mapped_column(String(200), default="未命名会议")
-    recorder: Mapped[str] = mapped_column(String(64), default="")  # 采集人标识
+    recorder: Mapped[str] = mapped_column(String(64), default="")  # 采集人标识（弃用，兼容保留）
     status: Mapped[str] = mapped_column(String(16), default="live")  # live | ended
     started_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
     ended_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # 结束时 AI 全文提取的事实性属性：JSON list[{"key","value"}]（主题/时间外的动态字段）
+    attributes: Mapped[str] = mapped_column(Text, default="")
 
 
 class Utterance(Base):
@@ -47,5 +49,6 @@ class Summary(Base):
     window_text: Mapped[str] = mapped_column(Text)  # 本窗口送入的原文（可审计）
     content: Mapped[str] = mapped_column(Text)  # 总结正文
     action_items: Mapped[str] = mapped_column(Text, default="[]")  # JSON list
+    attributes: Mapped[str] = mapped_column(Text, default="[]")  # 本段事实性属性 JSON list
     title: Mapped[str] = mapped_column(String(200), default="")  # 本段标题
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)

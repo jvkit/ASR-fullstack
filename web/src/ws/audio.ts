@@ -40,4 +40,14 @@ export class MicRecorder {
     this.source = null
     this.stream = null
   }
+
+  /** 暂停采集：AudioContext 挂起，PCM 回调停止；FunASR 连接保持 */
+  async pause(): Promise<void> {
+    if (this.ctx && this.ctx.state === 'running') await this.ctx.suspend()
+  }
+
+  /** 恢复采集 */
+  async resume(): Promise<void> {
+    if (this.ctx && this.ctx.state === 'suspended') await this.ctx.resume()
+  }
 }

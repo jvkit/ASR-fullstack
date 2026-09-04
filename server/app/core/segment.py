@@ -46,6 +46,17 @@ class UtteranceBuffer:
         async with self._lock:
             return len(self._items)
 
+    async def pending_chars(self) -> int:
+        """当前缓冲的字符总量（字数触发总结用）。"""
+        async with self._lock:
+            return sum(len(it.text) for it in self._items)
+
+    async def full_text(self, max_chars: int = 100000) -> str:
+        """从头到尾的全文（不消费），结束时整体提取属性用。"""
+        async with self._lock:
+            lines = [f"{it.speaker or '发言人'}: {it.text}" for it in self._items]
+            return "\n".join(lines)[:max_chars]
+
     async def drain_text(self, max_chars: int) -> str:
         """取走并格式化为「说话人: 内容」，超出 max_chars 的部分留下次。"""
         items = await self.drain()

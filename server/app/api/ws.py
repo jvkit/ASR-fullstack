@@ -6,6 +6,7 @@
     之后：
         二进制帧      → PCM int16 16kHz 音频块
         {"type":"stop"} → 结束会议
+        {"type":"pause"} / {"type":"resume"} → 暂停/恢复采集（暂停期间上行音频被丢弃）
     服务端推送（JSON）：
         {"type": "transcript_online", "text": ...}          流式临时字幕
         {"type": "transcript", "seq", "speaker", "text", ...}  确定句子（带说话人）
@@ -66,6 +67,12 @@ async def meeting_ws(ws: WebSocket) -> None:
                     continue
                 if ctrl.get("type") == "stop":
                     break
+                if ctrl.get("type") == "pause":
+                    session.paused = True
+                    logger.info("meeting %s paused", session.meeting_id)
+                elif ctrl.get("type") == "resume":
+                    session.paused = False
+                    logger.info("meeting %s resumed", session.meeting_id)
 
     except WebSocketDisconnect:
         logger.info("client disconnected")

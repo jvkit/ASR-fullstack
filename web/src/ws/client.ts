@@ -4,7 +4,7 @@ export type ServerMessage =
   | { type: 'started'; meeting_id: string }
   | { type: 'transcript_online'; text: string }
   | { type: 'transcript'; seq: number; speaker: string; text: string; start_ms: number; end_ms: number }
-  | { type: 'summary'; seq: number; final: boolean; title: string; points: string[]; action_items: unknown[] }
+  | { type: 'summary'; seq: number; final: boolean; title: string; points: string[]; action_items: unknown[]; attributes: unknown[] }
   | { type: 'ended'; meeting_id: string }
   | { type: 'error'; message: string }
 
@@ -25,12 +25,20 @@ export class MeetingWs {
     return this.ws?.readyState === WebSocket.OPEN
   }
 
-  start(title: string, recorder: string): void {
-    this.ws?.send(JSON.stringify({ type: 'start', title, recorder }))
+  start(title: string): void {
+    this.ws?.send(JSON.stringify({ type: 'start', title }))
   }
 
   sendPcm(bytes: ArrayBuffer): void {
     this.ws?.send(bytes)
+  }
+
+  pause(): void {
+    this.ws?.send(JSON.stringify({ type: 'pause' }))
+  }
+
+  resume(): void {
+    this.ws?.send(JSON.stringify({ type: 'resume' }))
   }
 
   stop(): void {

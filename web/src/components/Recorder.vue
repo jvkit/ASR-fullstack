@@ -1,30 +1,23 @@
 <script setup lang="ts">
-import { reactive, ref } from 'vue'
+import { reactive } from 'vue'
 
-const props = defineProps<{ recording: boolean }>()
+const props = defineProps<{ recording: boolean; paused: boolean }>()
 const emit = defineEmits<{
-  start: [payload: { title: string; recorder: string }]
+  start: [payload: { title: string }]
+  pause: []
+  resume: []
   stop: []
 }>()
 
-const form = reactive({
-  title: '产品周会',
-  recorder: '',
-})
+const form = reactive({ title: '未命名会议' })
 
-async function start() {
+function start() {
   if (!form.title.trim()) return
-  emit('start', { title: form.title.trim(), recorder: form.recorder.trim() })
+  emit('start', { title: form.title.trim() })
 }
 
-function stop() {
-  emit('stop')
-}
-
-// 默认采集人填本机用户名（简单标识，二期接 OA 账号）
-form.recorder = localStorage.getItem('recorder') || ''
-function persistRecorder() {
-  localStorage.setItem('recorder', form.recorder)
+function togglePause() {
+  props.paused ? emit('resume') : emit('pause')
 }
 </script>
 
@@ -34,20 +27,16 @@ function persistRecorder() {
       <el-form-item label="会议标题">
         <el-input v-model="form.title" :disabled="recording" style="width: 220px" />
       </el-form-item>
-      <el-form-item label="采集人">
-        <el-input
-          v-model="form.recorder"
-          :disabled="recording"
-          placeholder="你的名字"
-          style="width: 140px"
-          @change="persistRecorder"
-        />
-      </el-form-item>
       <el-form-item>
         <el-button v-if="!recording" type="danger" @click="start">● 开始记录</el-button>
-        <el-button v-else type="info" @click="stop">■ 结束会议</el-button>
+        <template v-else>
+          <el-button type="warning" @click="togglePause">{{ paused ? '继续' : '暂停' }}</el-button>
+          <el-button type="info" @click="emit('stop')">■ 结束会议</el-button>
+        </template>
       </el-form-item>
-      <el-tag v-if="recording" type="danger" effect="dark">REC</el-tag>
+      <el-tag v-if="recording" :type="paused ? 'info' : 'danger'" effect="dark">
+        {{ paused ? 'PAUSED' : 'REC' }}
+      </el-tag>
     </el-form>
   </el-card>
 </template>
