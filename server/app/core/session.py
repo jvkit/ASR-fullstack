@@ -53,6 +53,11 @@ class MeetingSession:
         self.final_attributes: list[dict] = []  # 累积的事实性属性（key 去重合并）
         self.spk_threshold: float = 0.55  # 说话人聚类阈值，前端可调
         self.speaker_count: int = 0  # 参会人数（前端填写，0=自动估计），会末重标注 oracle
+        # 高级调参（前端配置面板可覆盖；默认取 config.py）
+        self.max_speakers: int = settings.spk_max_speakers          # 实时聚类人数上限（0=不限）
+        self.vad_max_end_silence_ms: int = settings.vad_max_end_silence_ms
+        self.vad_max_segment_sec: int = settings.vad_max_segment_sec
+        self.spk_min_seg_sec: float = settings.spk_min_seg_sec
         self._audio = bytearray()  # 累计上行 PCM（int16/16kHz/mono），结束时写 wav
 
     # ---------- 生命周期 ----------
@@ -63,9 +68,10 @@ class MeetingSession:
             await db.commit()
         await self.asr.start({
             "spk_threshold": self.spk_threshold,
-            "vad_max_end_silence_ms": settings.vad_max_end_silence_ms,
-            "vad_max_segment_sec": settings.vad_max_segment_sec,
-            "spk_min_seg_sec": settings.spk_min_seg_sec,
+            "vad_max_end_silence_ms": self.vad_max_end_silence_ms,
+            "vad_max_segment_sec": self.vad_max_segment_sec,
+            "spk_min_seg_sec": self.spk_min_seg_sec,
+            "max_speakers": self.max_speakers,
         })
         logger.info("meeting %s started", self.meeting_id)
 

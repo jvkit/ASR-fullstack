@@ -27,10 +27,18 @@ export class MeetingWs {
     return this.ws?.readyState === WebSocket.OPEN
   }
 
-  start(title: string, spkThreshold?: number, speakerCount?: number): void {
+  start(
+    title: string,
+    opts?: { spkThreshold?: number; speakerCount?: number; maxSpeakers?: number;
+             vadMaxEndSilenceMs?: number; vadMaxSegmentSec?: number; spkMinSegSec?: number },
+  ): void {
     const payload: Record<string, unknown> = { type: 'start', title }
-    if (spkThreshold !== undefined) payload.spk_threshold = spkThreshold
-    if (speakerCount !== undefined && speakerCount > 0) payload.speaker_count = speakerCount
+    if (opts?.spkThreshold !== undefined) payload.spk_threshold = opts.spkThreshold
+    if (opts?.speakerCount !== undefined && opts.speakerCount > 0) payload.speaker_count = opts.speakerCount
+    if (opts?.maxSpeakers !== undefined && opts.maxSpeakers > 0) payload.max_speakers = opts.maxSpeakers
+    if (opts?.vadMaxEndSilenceMs !== undefined) payload.vad_max_end_silence_ms = opts.vadMaxEndSilenceMs
+    if (opts?.vadMaxSegmentSec !== undefined) payload.vad_max_segment_sec = opts.vadMaxSegmentSec
+    if (opts?.spkMinSegSec !== undefined) payload.spk_min_seg_sec = opts.spkMinSegSec
     this.ws?.send(JSON.stringify(payload))
   }
 

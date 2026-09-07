@@ -62,6 +62,31 @@ async def meeting_ws(ws: WebSocket) -> None:
                 session.speaker_count = sc
         except (TypeError, ValueError):
             pass
+        # 高级调参（前端配置面板，逐项透传给 gpu FunASR / diarize）
+        try:
+            ms = int(ctrl.get("max_speakers") or 0)
+            if 1 <= ms <= 15:
+                session.max_speakers = ms
+        except (TypeError, ValueError):
+            pass
+        try:
+            vad = int(ctrl.get("vad_max_end_silence_ms") or 0)
+            if 100 <= vad <= 2000:
+                session.vad_max_end_silence_ms = vad
+        except (TypeError, ValueError):
+            pass
+        try:
+            vseg = int(ctrl.get("vad_max_segment_sec") or 0)
+            if 2 <= vseg <= 60:
+                session.vad_max_segment_sec = vseg
+        except (TypeError, ValueError):
+            pass
+        try:
+            smin = float(ctrl.get("spk_min_seg_sec") or 0)
+            if 0 <= smin <= 10:
+                session.spk_min_seg_sec = smin
+        except (TypeError, ValueError):
+            pass
         session.clients.add(ws)
         await session.start()
         await ws.send_text(json.dumps({"type": "started", "meeting_id": session.meeting_id}))

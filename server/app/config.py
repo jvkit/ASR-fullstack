@@ -19,8 +19,9 @@ class Settings(BaseSettings):
     # 会末重标注（gpu diarize 服务）
     diarize_http_url: str = "http://192.168.30.87:10096"  # 阿里 pipeline 切分 + ERes2NetV2 声纹
     reannotate_oracle_extra: int = 1      # 人数估计 = 注册声纹数 + 此值（宁多勿少，按名合并自愈）
-    reannotate_max_oracle: int = 6        # 人数上限
+    reannotate_max_oracle: int = 8        # 重标注人数上限
     reannotate_min_sec: int = 10          # 短于此秒数不做重标注
+    diarize_max_oracle: int = 8           # 阿里 pipeline 自动模式人数候选上限（自动估计时在 2..N 里挑）
 
     # LLM（内网 vLLM / mymodule 网关）
     llm_base_url: str = "http://127.0.0.1:4000/v1"
@@ -59,6 +60,9 @@ class Settings(BaseSettings):
     vad_max_end_silence_ms: int = 350    # 静音多久判"说完"（原模型默认 800，正常换气约 300-600ms）
     vad_max_segment_sec: int = 8         # 单段最长秒数，超时强制切（原模型默认 60，长段必混多人）
     spk_min_seg_sec: float = 1.0         # 短于此秒数的段不做声纹（碎段 embedding 不稳）
+
+    # 说话人聚类上限（发给 gpu FunASR；0=不限制，>0 则匿名聚类最多 N 人，超出并入最相近簇）
+    spk_max_speakers: int = 0
 
 
 def load_hotwords() -> str:

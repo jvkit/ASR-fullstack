@@ -106,7 +106,15 @@ function handleMessage(msg: ServerMessage) {
   }
 }
 
-async function onStart(payload: { title: string; spkThreshold: number; speakerCount: number }) {
+async function onStart(payload: {
+  title: string
+  spkThreshold: number
+  speakerCount: number
+  maxSpeakers: number
+  vadMaxEndSilenceMs: number
+  vadMaxSegmentSec: number
+  spkMinSegSec: number
+}) {
   if (insecure.value) {
     showToast({ message: 'http 访问下浏览器禁止麦克风，请用 https 地址打开', type: 'fail', duration: 4000 })
     return
@@ -138,7 +146,14 @@ async function onStart(payload: { title: string; spkThreshold: number; speakerCo
     ws.close()
     return
   }
-  ws.start(payload.title, payload.spkThreshold, payload.speakerCount || undefined)
+  ws.start(payload.title, {
+    spkThreshold: payload.spkThreshold,
+    speakerCount: payload.speakerCount || undefined,
+    maxSpeakers: payload.maxSpeakers || undefined,
+    vadMaxEndSilenceMs: payload.vadMaxEndSilenceMs,
+    vadMaxSegmentSec: payload.vadMaxSegmentSec,
+    spkMinSegSec: payload.spkMinSegSec,
+  })
   recording.value = true
 }
 

@@ -69,6 +69,9 @@ class FunasrClient:
             config["hotwords"] = self.hotwords
         if extra_config:
             config.update(extra_config)
+        # max_speakers > 0 时才传（0 表示不限制，不传让 gpu 用默认）
+        if config.get("max_speakers"):
+            config["max_speakers"] = int(config["max_speakers"])
         await self._connect(json.dumps(config, ensure_ascii=False))
 
     async def _connect(self, config_msg: str) -> None:
