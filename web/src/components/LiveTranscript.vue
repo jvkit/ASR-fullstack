@@ -5,6 +5,7 @@ interface Utterance {
   seq: number
   speaker: string
   text: string
+  draft: boolean
 }
 
 const props = defineProps<{
@@ -50,7 +51,8 @@ watch(
         >
           {{ u.speaker }}
         </van-tag>
-        <span class="utt-text">{{ u.text }}</span>
+        <span class="utt-text" :class="{ draft: u.draft }">{{ u.text }}</span>
+        <van-tag v-if="u.draft" size="mini" plain type="default" class="draft-tag">识别中</van-tag>
       </div>
       <div v-if="onlineText" class="online">{{ onlineText }}…</div>
       <van-empty v-if="!utterances.length && !onlineText" description="开始说话后将实时显示转写" />
@@ -63,6 +65,8 @@ watch(
 .list { height: 40vh; overflow-y: auto; padding: 8px 16px; }
 .utt { margin-bottom: 10px; display: flex; align-items: baseline; gap: 8px; }
 .utt-text { flex: 1; word-break: break-word; }
+.utt-text.draft { color: #999; font-style: italic; }
+.draft-tag { flex-shrink: 0; color: #bbb; }
 .spk-tag { flex-shrink: 0; }
 .online { color: #999; font-style: italic; padding-left: 2px; }
 @media (min-width: 768px) { .list { height: 60vh; } }

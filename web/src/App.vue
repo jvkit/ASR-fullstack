@@ -15,6 +15,7 @@ interface Utterance {
   seq: number
   speaker: string
   text: string
+  draft: boolean // 草稿：原始转写（未纠错定稿），收到 corrected update 后变正式
 }
 
 interface SummaryItem {
@@ -66,14 +67,16 @@ function handleMessage(msg: ServerMessage) {
       break
     case 'transcript':
       onlineText.value = ''
-      utterances.value.push({ seq: msg.seq, speaker: msg.speaker || '发言人', text: msg.text })
+      utterances.value.push({ seq: msg.seq, speaker: msg.speaker || '发言人', text: msg.text, draft: true })
       colorOf(msg.speaker || '发言人')
       break
     case 'transcript_update': {
       // 滚动打标/纠错回写：按 seq 原地替换说话人与文本
+      // corrected=true → 定稿（去草稿样式）；false → 仅换说话人标签（打标），文字仍是草稿
       const idx = utterances.value.findIndex((u) => u.seq === msg.seq)
       if (idx >= 0) {
-        utterances.value[idx] = { seq: msg.seq, speaker: msg.speaker || '发言人', text: msg.text }
+        const draft = msg.corrected ? false : utterances.value[idx].draft
+        utterances.value[idx] = { seq: msg.seq, speaker: msg.speaker || '发言人', text: msg.text, draft }
         colorOf(msg.speaker || '发言人')
       }
       break

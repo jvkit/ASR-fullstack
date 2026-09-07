@@ -21,6 +21,8 @@ class Meeting(Base):
     ended_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     # 结束时 AI 全文提取的事实性属性：JSON list[{"key","value"}]（主题/时间外的动态字段）
     attributes: Mapped[str] = mapped_column(Text, default="")
+    # 结束时 AI 归纳的会议标签：JSON list[str]
+    tags: Mapped[str] = mapped_column(Text, default="[]")
     # 会末重标注是否完成（阿里 pipeline 切分 + ERes2NetV2 声纹标身份）
     reannotated: Mapped[bool] = mapped_column(default=False)
 

@@ -86,6 +86,14 @@ class UtteranceBuffer:
         async with self._lock:
             return [it for it in self._all if it.seq in want]
 
+    def items_by_seqs_nowait(self, seqs: list[int]) -> list[UtteranceItem]:
+        """同步版 items_by_seqs：供句终回调等同步上下文使用（无 await）。
+
+        注意：append-only 列表读取在 CPython 单事件循环下是安全的。
+        """
+        want = set(seqs)
+        return [it for it in self._all if it.seq in want]
+
     async def recent_summary_hint(self) -> str:
         """最近一次总结要点（纠错时给 LLM 当全局上下文）。"""
         # 由 session 注入（避免循环引用），返回缓存的 prev_summary

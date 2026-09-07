@@ -19,7 +19,6 @@ from app.config import settings, load_hotwords
 from app.core.asr_client import FunasrClient
 from app.core.roller import RollingEnhancer
 from app.core.segment import UtteranceBuffer
-from app.core.summarizer import SummaryScheduler
 from app.db.database import SessionLocal
 from app.db.models import Meeting, Summary, Utterance
 from app.llm import client as llm_client
@@ -34,7 +33,6 @@ class MeetingSession:
         self.recorder = recorder
         self.clients: set[WebSocket] = set()
         self.buffer = UtteranceBuffer()
-        self.prev_summary = ""  # 滚动摘要上下文（截断保存）
         self.summary_seq = 0
         self._asr_closed = asyncio.Event()
         self._stopped = False
@@ -48,7 +46,6 @@ class MeetingSession:
             on_error=self._on_asr_error,
             on_closed=self._on_asr_closed,
         )
-        self.scheduler = SummaryScheduler(self)
         self.roller = RollingEnhancer(self)
 
         self.paused = False  # 前端暂停：丢弃上行音频（连接保持）
@@ -70,11 +67,15 @@ class MeetingSession:
             "vad_max_segment_sec": settings.vad_max_segment_sec,
             "spk_min_seg_sec": settings.spk_min_seg_sec,
         })
-        self.scheduler.start()
         logger.info("meeting %s started", self.meeting_id)
 
     async def stop(self) -> None:
-        """结束会议：flush ASR 剩余音频 → 等最终 offline 结果 → 最终总结 → 收尾。"""
+        """结束会议：立刻收尾可落库的部分并广播 ended，重活全部转后台。
+
+        同步段（用户等待的部分）：flush ASR → 等关闭 → 存录音 → 落库 ended + 广播。
+        后台段（_finalize）：等在飞滚动轮次 → 会末总结/标签/属性提取 → 更新会议元信息
+        → 会末重标注。LLM 网关抽风时这些步骤慢，但用户点结束立即看到结束。
+        """
         async with self._lock:
             if self._stopped:
                 return
@@ -86,41 +87,91 @@ class MeetingSession:
         except (TimeoutError, asyncio.TimeoutError):
             logger.warning("meeting %s: asr close timeout", self.meeting_id)
 
-        # 等在飞的滚动增强一轮跑完（上限 30s，超时放弃）
-        try:
-            if self.roller._task is not None:
-                await asyncio.wait_for(asyncio.shield(self.roller._task), timeout=30)
-        except (TimeoutError, asyncio.TimeoutError):
-            logger.warning("meeting %s: rolling round timeout on stop", self.meeting_id)
-        except Exception:
-            pass
-
-        # 收尾：最终总结 + 剩余尾巴属性提取（scheduler.stop 里做了），最后落库 title/attributes
-        await self.scheduler.stop(final_summary=True)
-
-        # scheduler 收尾会触发属性提取，final_title/final_attributes 已填充
         self._save_recording()
 
+        # 立刻落库 ended + 广播（用户视角：点结束立即结束）
         async with SessionLocal() as db:
             meeting = await db.get(Meeting, self.meeting_id)
             if meeting:
                 meeting.status = "ended"
                 meeting.ended_at = datetime.now()
-                # AI 归纳的主题覆盖手填标题；空则保留原值
-                if self.final_title:
-                    meeting.title = self.final_title
-                if self.final_attributes:
-                    meeting.attributes = json.dumps(self.final_attributes, ensure_ascii=False)
                 await db.commit()
-
         await self.broadcast({"type": "ended", "meeting_id": self.meeting_id})
-        logger.info("meeting %s ended", self.meeting_id)
+        logger.info("meeting %s ended (finalization continues in background)", self.meeting_id)
 
-        # 会末重标注（异步，不阻塞 ended；阿里 pipeline 切分 + ERes2NetV2 标身份）
+        # 重活转后台：等滚动轮次收尾 → 会末总结 → 重标注
+        asyncio.create_task(self._finalize())
+
+    async def _finalize(self) -> None:
+        """会末收尾（后台）：最终总结/标题/标签/属性 + 重标注。失败仅记日志。"""
+        session_id = self.meeting_id
+        try:
+            rolling_summary = await self.roller.finish()
+
+            # 会末总结：优先用滚动纪要（已纠错、信息密度高），全文太长时纪要兜底更稳
+            full_text = await self.buffer.full_text()
+            final_input = full_text
+            if len(full_text) > 6000 and rolling_summary:
+                final_input = rolling_summary
+            result = await llm_client.extract_final_attributes(final_input)
+
+            final_title = result["title"]
+            final_summary = result["summary"] or rolling_summary
+            final_tags = result["tags"][:settings.final_tags_count]
+            # 属性：滚动提取的 + 会末提取的合并（key 去重，滚动版优先）
+            merged: dict[str, str] = {}
+            for a in result["attributes"]:
+                if isinstance(a, dict) and a.get("key"):
+                    merged[str(a["key"])] = str(a.get("value", ""))
+            for a in self.final_attributes:
+                merged[a["key"]] = a["value"]
+
+            async with SessionLocal() as db:
+                meeting = await db.get(Meeting, session_id)
+                if meeting:
+                    if final_title:
+                        meeting.title = final_title
+                    if final_tags:
+                        meeting.tags = json.dumps(final_tags, ensure_ascii=False)
+                    if merged:
+                        meeting.attributes = json.dumps(
+                            [{"key": k, "value": v} for k, v in merged.items()],
+                            ensure_ascii=False,
+                        )
+                    await db.commit()
+
+            # 滚动纪要作为最终总结落一条 Summary（可审计、供报告导出）
+            if final_summary:
+                self.summary_seq += 1
+                async with SessionLocal() as db:
+                    db.add(Summary(
+                        meeting_id=session_id,
+                        seq=self.summary_seq,
+                        window_text="",
+                        content=final_summary,
+                        action_items="[]",
+                        attributes="[]",
+                        title=final_title or "最终总结",
+                    ))
+                    await db.commit()
+                await self.broadcast({
+                    "type": "summary",
+                    "seq": self.summary_seq,
+                    "final": True,
+                    "title": final_title or "最终总结",
+                    "points": [p.lstrip("· ").strip() for p in final_summary.splitlines() if p.strip()],
+                    "action_items": [],
+                    "attributes": [{"key": k, "value": v} for k, v in merged.items()],
+                })
+            logger.info("meeting %s finalized", session_id)
+        except Exception:
+            logger.exception("meeting %s finalize failed", session_id)
+
+        # 会末重标注（阿里 pipeline 切分 + ERes2NetV2 标身份）
         from app.core.reannotate import reannotate
 
         pcm = bytes(self._audio)
-        asyncio.create_task(reannotate(self.meeting_id, pcm, speaker_count=self.speaker_count))
+        await reannotate(session_id, pcm, speaker_count=self.speaker_count)
 
     async def handle_audio(self, pcm: bytes) -> None:
         if self._stopped or self.paused:
@@ -195,67 +246,6 @@ class MeetingSession:
                         self.meeting_id, out_path, len(self._audio) / 32000 / 60)
         except Exception:
             logger.exception("meeting %s save recording failed", self.meeting_id)
-
-    async def extract_attributes(self, text: str) -> None:
-        """对新增转写文本提取事实性属性，合并进 final_attributes 并广播给前端。"""
-        if not text.strip():
-            return
-        result = await llm_client.extract_final_attributes(text)
-        if result["title"] and not self.final_title:
-            self.final_title = result["title"]  # 第一次拿到主题就定住，后续覆盖需手动
-        merged: dict[str, str] = {a["key"]: a["value"] for a in self.final_attributes}
-        for a in result["attributes"]:
-            if isinstance(a, dict) and a.get("key"):
-                merged[str(a["key"])] = str(a.get("value", ""))
-        self.final_attributes = [{"key": k, "value": v} for k, v in merged.items()]
-
-        # 实时广播最新属性（前端会议信息区即时渲染）
-        await self.broadcast({
-            "type": "attributes",
-            "title": self.final_title,
-            "attributes": self.final_attributes,
-        })
-
-    async def run_summary(self, final: bool) -> None:
-        # 非结束时句子太少就攒着，避免碎窗口浪费 LLM 调用
-        if await self.buffer.pending_count() == 0:
-            return
-        if not final and await self.buffer.pending_count() < settings.summary_min_utterances:
-            return
-        window_text = await self.buffer.drain_text(settings.summary_max_chars)
-
-        result = await llm_client.summarize_window(self.prev_summary, window_text)
-        if not result["points"] and not result["action_items"]:
-            return
-
-        # 滚动上下文 = 旧摘要 + 本段要点，截断防膨胀
-        combined = self.prev_summary + "\n" + "\n".join(f"· {p}" for p in result["points"])
-        self.prev_summary = combined.strip()[-2000:]
-        # 纠错器用最新纪要当全局上下文
-        self.buffer.set_summary_hint(self.prev_summary)
-        self.summary_seq += 1
-
-        async with SessionLocal() as db:
-            db.add(Summary(
-                meeting_id=self.meeting_id,
-                seq=self.summary_seq,
-                window_text=window_text,
-                content="\n".join(f"· {p}" for p in result["points"]),
-                action_items=json.dumps(result["action_items"], ensure_ascii=False),
-                attributes=json.dumps(result["attributes"], ensure_ascii=False),
-                title=result["title"],
-            ))
-            await db.commit()
-
-        await self.broadcast({
-            "type": "summary",
-            "seq": self.summary_seq,
-            "final": final,
-            "title": result["title"],
-            "points": result["points"],
-            "action_items": result["action_items"],
-            "attributes": result["attributes"],
-        })
 
     # ---------- 广播 ----------
 

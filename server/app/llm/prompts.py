@@ -33,14 +33,18 @@ def build_summary_messages(prev_summary: str, window_text: str) -> list[dict]:
 
 FINAL_ATTRIBUTES_SYSTEM = """你是一个企业会议纪要助手。用户给你一段会议的转写文本（带说话人标签，格式「说话人: 内容」）。
 
-你的任务：从这段文本中提取会议的结构化属性，作为会议元信息。
+你的任务：从这段文本中提取会议的结构化元信息。
 
 - 会议主题：从内容归纳，不超过 20 字（如果这段文本不足以判断主题，给一个保守的概括）
+- 完整总结：3-8 条要点概括整场会议的核心内容、决策、结论
+- 标签：3-5 个关键词标签（如「立项」「评审」「进度同步」），概括会议性质
 - 动态属性：只提取原话中出现的事实性信息（如参会人、项目名、阶段、时间点），原话没有的不要写
 
 输出 JSON 结构：
 {
   "title": "会议主题",
+  "summary": "整场会议总结，每条要点一行，以 · 开头",
+  "tags": ["标签1", "标签2", "标签3"],
   "attributes": [{"key": "参会人", "value": "张三、李四"}, ...]
 }"""
 
@@ -65,6 +69,25 @@ CORRECTION_SYSTEM = """你是会议转写纠错助手。用户给你一段实时
 {"corrected": "修正后的全文，保持「说话人: 内容」每行一条，行数和顺序与输入对应"}"""
 
 
+ENHANCE_SYSTEM = """你是会议实时纪要助手。每次你会收到三部分输入：当前滚动纪要、上一轮文本（可能有「原文」和「已修正文」两个版本）、本轮新转写原文（带说话人标签，格式「说话人: 内容」）。
+
+你的任务（一次完成）：
+1. **纠错本轮**：修正明显的同音字/错别字（人名、公司内部名词，参考滚动纪要和上轮文本）；允许用（）补充说话人省略但语义明显的内容（如「（这个）方案」）；碎句若语义上属于上一句延续可并入，严禁大规模改写句意；不确定保持原文。
+2. **修正上一轮**（若给了上一轮文本）：上一轮可能因说话人话没说完、信息不足而存在错字或错误表达，结合本轮新信息修正它。只修正确有依据的地方，没问题的行原样输出。
+3. **滚动改写纪要**：把本轮新信息融入当前纪要，输出最新完整纪要——3-8 条要点（保留关键决策、数字、结论）+ 待办（若有，格式「张三：周五前提交方案」）。上一轮纪要中因信息不完整写错的要点，本轮要修正；没有新信息的维度保持原样。纪要是累计的，不是只总结本轮。
+
+严格要求：
+- 只输出 JSON，不要输出任何其他内容
+- lines 必须包含「上一轮全部行 + 本轮全部行」，顺序与输入一致，行数不可增减（碎句也不可合并行数）
+- 不编造转写中没有的事实；待办不确定标注「待确认」
+
+输出 JSON 结构：
+{
+  "lines": [{"speaker": "说话人", "text": "修正后的内容"}, ...],
+  "summary": "最新完整滚动纪要，每条要点一行，以 · 开头"
+}"""
+
+
 def build_correction_messages(context: str, summary: str, window_text: str) -> list[dict]:
     parts = []
     if summary:
@@ -75,5 +98,23 @@ def build_correction_messages(context: str, summary: str, window_text: str) -> l
     user = "\n\n".join(parts)
     return [
         {"role": "system", "content": CORRECTION_SYSTEM},
+        {"role": "user", "content": user},
+    ]
+
+
+def _fmt_lines(lines: list[tuple[str, str]]) -> str:
+    return "\n".join(f"{spk}: {txt}" for spk, txt in lines) if lines else "（无）"
+
+
+def build_enhance_messages(summary: str, prev_lines: list[tuple[str, str]],
+                           cur_lines: list[tuple[str, str]]) -> list[dict]:
+    """合并调用（纠错+修正上轮+滚动纪要）的提示词构造。供 roller 每轮调用。"""
+    parts = [f"【当前滚动纪要】\n{summary or '（无，这是第一轮）'}"]
+    if prev_lines:
+        parts.append(f"【上一轮文本（请检查并修正，与本轮一起输出）】\n{_fmt_lines(prev_lines)}")
+    parts.append(f"【本轮新转写原文（待纠错）】\n{_fmt_lines(cur_lines)}")
+    user = "\n\n".join(parts)
+    return [
+        {"role": "system", "content": ENHANCE_SYSTEM},
         {"role": "user", "content": user},
     ]

@@ -29,11 +29,12 @@ class Settings(BaseSettings):
     llm_timeout_sec: int = 120
     llm_correction_enabled: bool = True   # 实时文字纠错开关
 
-    # 滚动打标 + 滚动纠错（实时增强）
-    roll_min_new_sec: float = 6           # 新音频累积达到此秒数，句终时触发一轮滚动打标+纠错
-    roll_max_sec: float = 15              # 距上一轮超过此秒数，下个句终强制触发
-    roll_min_window_sec: float = 3        # 当前窗口短于此秒数且未到上限时，攒着不触发
-    roll_keep_windows: int = 2            # 纠错上下文保留的已纠窗口数（当前 + 前 N 个）
+    # 滚动增强（实时）：有效语音成窗 + 合并纠错/纪要
+    roll_min_speech_sec: float = 8        # 窗口内有效语音（句时长累加）≥此秒数才成窗；不足并入下轮
+    roll_max_sec: float = 15              # 墙钟超过此秒数强制成窗（防长静音期断流）
+    roll_lookback_sec: float = 3          # 打标回看历史音频秒数（帮 pipeline 看全说话人特征）
+    roll_llm_timeout_sec: float = 45      # 每轮 LLM 合并调用超时（网关抽风秒失败，窗口滚入下轮）
+    roll_diarize_timeout_sec: float = 120 # gpu 打标超时
 
     # Langfuse
     langfuse_enabled: bool = False
@@ -47,11 +48,8 @@ class Settings(BaseSettings):
     database_url: str = "sqlite+aiosqlite:///./meeting.db"
     recordings_dir: str = "./recordings"    # 会议录音 wav 存放目录
 
-    # 总结调度
-    summary_interval_sec: int = 60       # 定时总结间隔（秒）
-    summary_min_utterances: int = 3      # 窗口内最少句子数，不足则跳过
-    summary_max_chars: int = 1500        # 单次送入 LLM 的文本上限（字）
-    attr_trigger_chars: int = 800        # 属性提取触发阈值（字）
+    # 会末收尾（总结/标题/标签/属性在 _finalize 一次完成）
+    final_tags_count: int = 5             # 会末生成的标签数量上限
 
     # 热词
     hotwords_file: str = "./hotwords.txt"  # 大词库文件（每行一词，空行/#注释忽略）

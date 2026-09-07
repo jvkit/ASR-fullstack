@@ -37,6 +37,7 @@ client = OpenAI(
     base_url=settings.llm_base_url,
     api_key=settings.llm_api_key,
     timeout=settings.llm_timeout_sec,
+    max_retries=0,  # 网关抽风时秒失败，绝不重试排队（重试曾导致单任务卡 6 分钟堵死轮次）
 )
 
 
@@ -70,12 +71,12 @@ async def summarize_window(prev_summary: str, window_text: str) -> dict:
 
 
 async def extract_final_attributes(full_text: str) -> dict:
-    """会议结束时对全文提取主题 + 动态属性（事实性，供详情页渲染）。
+    """会议结束时对全文提取主题 + 完整总结 + 标签 + 动态属性（事实性）。
 
-    返回 {"title": str, "attributes": list[{"key","value"}]}
+    返回 {"title": str, "summary": str, "tags": list[str], "attributes": list[{"key","value"}]}
     """
     if not full_text.strip():
-        return {"title": "", "attributes": []}
+        return {"title": "", "summary": "", "tags": [], "attributes": []}
     messages = prompts.build_final_attributes_messages(full_text)
     try:
         resp = await asyncio.to_thread(
@@ -89,14 +90,22 @@ async def extract_final_attributes(full_text: str) -> dict:
         data = json.loads(raw)
         return {
             "title": str(data.get("title", "")),
+            "summary": str(data.get("summary", "")),
+            "tags": [str(t) for t in data.get("tags", [])],
             "attributes": data.get("attributes", []),
         }
     except Exception:
         logger.exception("extract_final_attributes failed")
-        return {"title": "", "attributes": []}
+        return {"title": "", "summary": "", "tags": [], "attributes": []}
 
 
 def build_correction_messages(context: str, summary: str, window_text: str) -> list[dict]:
-    """纠错提示词构造（供 roller 调用），保持 prompts 单点维护。"""
+    """纠错提示词构造（保持 prompts 单点维护）。"""
     return prompts.build_correction_messages(context, summary, window_text)
+
+
+def build_enhance_messages(summary: str, prev_lines: list[tuple[str, str]],
+                           cur_lines: list[tuple[str, str]]) -> list[dict]:
+    """合并调用（纠错+修正上轮+滚动纪要）提示词构造（供 roller 每轮调用）。"""
+    return prompts.build_enhance_messages(summary, prev_lines, cur_lines)
 

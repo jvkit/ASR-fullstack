@@ -27,6 +27,7 @@ async def list_meetings(limit: int = 50) -> list[dict]:
                 "started_at": m.started_at.isoformat() if m.started_at else None,
                 "ended_at": m.ended_at.isoformat() if m.ended_at else None,
                 "attributes": json.loads(m.attributes or "[]"),
+                "tags": json.loads(m.tags or "[]"),
                 "reannotated": bool(m.reannotated),
             }
             for m in rows
@@ -54,6 +55,7 @@ async def meeting_detail(meeting_id: str) -> dict:
             "started_at": meeting.started_at.isoformat() if meeting.started_at else None,
             "ended_at": meeting.ended_at.isoformat() if meeting.ended_at else None,
             "attributes": json.loads(meeting.attributes or "[]"),
+            "tags": json.loads(meeting.tags or "[]"),
             "reannotated": bool(meeting.reannotated),
             # 有录音文件才有回放地址
             "audio_url": (
@@ -139,6 +141,9 @@ async def meeting_report(meeting_id: str) -> dict:
         for kv in json.loads(meeting.attributes or "[]"):
             if isinstance(kv, dict) and kv.get("key"):
                 info.append((str(kv["key"]), str(kv.get("value", ""))))
+        tags = json.loads(meeting.tags or "[]")
+        if tags:
+            info.append(("标签", "、".join(str(t) for t in tags)))
         if info:
             parts.append("## 会议信息\n")
             for k, v in info:
