@@ -266,18 +266,20 @@ class RollingEnhancer:
 
         if updates:
             await self._persist_texts(updates)
-            for seq, spk, txt in updates:
-                it = prev_by_seq.get(seq) or next((x for x in items if x.seq == seq), None)
-                if it is not None:
-                    await self._session.broadcast({
-                        "type": "transcript_update",
-                        "seq": it.seq,
-                        "speaker": it.speaker,
-                        "text": it.text,
-                        "start_ms": it.start_ms,
-                        "end_ms": it.end_ms,
-                        "corrected": True,
-                    })
+
+        # 本轮窗口内句子已全部定稿：即使文字未变也要广播 corrected=True，
+        # 否则原样返回（无可纠）时前端草稿态（识别中）永远解除不了
+        revised_prev = [it for it in prev_items if any(u[0] == it.seq for u in updates)]
+        for it in revised_prev + items:
+            await self._session.broadcast({
+                "type": "transcript_update",
+                "seq": it.seq,
+                "speaker": it.speaker,
+                "text": it.text,
+                "start_ms": it.start_ms,
+                "end_ms": it.end_ms,
+                "corrected": True,
+            })
 
         # 滚动纪要：改写式更新（先出、后修）+ 广播给前端
         if result["summary"]:
