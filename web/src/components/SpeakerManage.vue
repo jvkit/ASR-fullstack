@@ -1,11 +1,13 @@
 <script setup lang="ts">
 import { onMounted, reactive, ref } from 'vue'
+import { showConfirmDialog, showToast } from 'vant'
 import { MicRecorder } from '../ws/audio'
 
 const speakers = ref<string[]>([])
 const loading = ref(false)
 const errorMsg = ref('')
 const okMsg = ref('')
+const insecure = ref(false) // http 非安全上下文：浏览器禁止麦克风
 
 const form = reactive({ name: '' })
 const mic = reactive(new MicRecorder())
@@ -28,14 +30,34 @@ async function load() {
   }
 }
 
-onMounted(load)
+onMounted(() => {
+  load()
+  // http 访问非 localhost 时 navigator.mediaDevices 为 undefined，麦克风必然失败，提前提示
+  if (typeof navigator !== 'undefined' && navigator.mediaDevices === undefined) {
+    insecure.value = true
+  }
+})
 
 async function startRecord() {
+  if (insecure.value) {
+    errorMsg.value = '当前为 http 访问，浏览器禁止使用麦克风。请改用 https 地址打开本页。'
+    return
+  }
   errorMsg.value = ''
   okMsg.value = ''
   chunks = []
   recorded.value = 0
-  await mic.start((bytes) => chunks.push(bytes))
+  try {
+    await mic.start((bytes) => chunks.push(bytes))
+  } catch (e) {
+    recording.value = false
+    const name = (e as DOMException)?.name
+    errorMsg.value =
+      name === 'NotAllowedError'
+        ? '麦克风权限被拒绝：请点击浏览器地址栏左侧的锁形图标，允许麦克风后重试。'
+        : `无法打开麦克风：${e}`
+    return
+  }
   recording.value = true
   timer = setInterval(() => {
     recorded.value = chunks.length * 0.1
@@ -80,6 +102,11 @@ async function stopAndEnroll() {
 }
 
 async function remove(name: string) {
+  try {
+    await showConfirmDialog({ title: '删除声纹', message: `确定删除「${name}」？` })
+  } catch {
+    return // 取消
+  }
   loading.value = true
   try {
     const r = await fetch(`/api/speakers/${encodeURIComponent(name)}`, { method: 'DELETE' })
@@ -97,54 +124,75 @@ async function remove(name: string) {
 </script>
 
 <template>
-  <el-card shadow="never" v-loading="loading">
-    <template #header>
-      <div style="display: flex; align-items: center; gap: 12px">
-        <span style="flex: 1; font-weight: 600">声纹管理</span>
-        <el-button size="small" @click="load">刷新</el-button>
-      </div>
-    </template>
-
-    <el-alert
-      v-if="errorMsg"
-      :title="errorMsg"
-      type="error"
-      :closable="false"
-      style="margin-bottom: 12px"
-      @close="errorMsg = ''"
+  <div class="speaker-page">
+    <van-notice-bar
+      v-if="insecure"
+      mode="closeable"
+      color="#fff"
+      background="#e64340"
+      text="当前为 http 访问，浏览器禁止使用麦克风，请改用 https 地址打开"
     />
-    <el-alert
-      v-if="okMsg"
-      :title="okMsg"
-      type="success"
-      :closable="true"
-      style="margin-bottom: 12px"
-      @close="okMsg = ''"
+    <van-notice-bar
+      v-else
+      mode="closeable"
+      color="#614700"
+      background="#fffbe8"
+      text="声纹模型已升级（ERes2NetV2）：旧注册数据不兼容，请所有已注册人员重新录一段"
     />
+    <van-notice-bar v-if="errorMsg" mode="closeable" color="#fff" background="#e64340" :text="errorMsg" @close="errorMsg = ''" />
+    <van-notice-bar v-if="okMsg" mode="closeable" color="#0a7a4b" background="#e8f7ef" :text="okMsg" @close="okMsg = ''" />
 
-    <h4 style="margin: 0 0 8px">注册新声纹</h4>
-    <el-form inline @submit.prevent>
-      <el-form-item label="姓名">
-        <el-input v-model="form.name" placeholder="如：张三" style="width: 160px" :disabled="recording" />
-      </el-form-item>
-      <el-form-item>
-        <el-button v-if="!recording" type="danger" @click="startRecord">● 开始录音</el-button>
-        <el-button v-else type="success" @click="stopAndEnroll">■ 结束并注册{{ recorded ? `（${recorded.toFixed(1)}s）` : '' }}</el-button>
-      </el-form-item>
-    </el-form>
-    <el-text type="info" size="small">
-      对着这台电脑的麦克风念 5~10 秒日常话语（开会时的设备），注册后会议中自动识别为该姓名。
-    </el-text>
-
-    <h4 style="margin: 20px 0 8px">已注册（{{ speakers.length }}）</h4>
-    <el-empty v-if="!speakers.length" description="暂无注册声纹" />
-    <div v-for="s in speakers" :key="s" style="margin-bottom: 6px; display: flex; align-items: center; gap: 8px">
-      <el-tag effect="plain" style="min-width: 100px">{{ s }}</el-tag>
-      <el-popconfirm title="确定删除该声纹？" @confirm="remove(s)">
-        <template #reference>
-          <el-button size="small" type="danger" plain>删除</el-button>
+    <van-cell-group inset class="block">
+      <template #title>注册新声纹</template>
+      <van-field
+        v-model="form.name"
+        label="姓名"
+        placeholder="如：张三"
+        :disabled="recording"
+      />
+      <van-field label="说明">
+        <template #input>
+          <span class="tip">对着当前设备的麦克风念 5~10 秒日常话语（用开会时的同一台设备），注册后会议中自动识别为该姓名</span>
         </template>
-      </el-popconfirm>
-    </div>
-  </el-card>
+      </van-field>
+      <div class="rec-actions">
+        <van-button
+          v-if="!recording"
+          type="danger"
+          round
+          block
+          :disabled="insecure || !form.name.trim()"
+          :loading="loading"
+          @click="startRecord"
+        >
+          ● 开始录音
+        </van-button>
+        <van-button
+          v-else
+          type="success"
+          round
+          block
+          @click="stopAndEnroll"
+        >
+          ■ 结束并注册{{ recorded ? `（已录 ${recorded.toFixed(1)}s）` : '' }}
+        </van-button>
+      </div>
+    </van-cell-group>
+
+    <van-cell-group inset class="block" :title="`已注册（${speakers.length}）`">
+      <van-empty v-if="!speakers.length" description="暂无注册声纹" />
+      <van-cell v-for="s in speakers" :key="s" :title="s">
+        <template #right-icon>
+          <van-button size="small" type="danger" plain @click="remove(s)">删除</van-button>
+        </template>
+      </van-cell>
+    </van-cell-group>
+  </div>
 </template>
+
+<style scoped>
+.speaker-page { padding-bottom: 24px; }
+.block { margin-top: 12px; }
+.rec-actions { padding: 8px 16px 16px; }
+.tip { font-size: 13px; color: #969799; line-height: 1.6; }
+</style>

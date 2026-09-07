@@ -15,8 +15,9 @@ from datetime import datetime
 
 from fastapi import WebSocket
 
-from app.config import settings
+from app.config import settings, load_hotwords
 from app.core.asr_client import FunasrClient
+from app.core.roller import RollingEnhancer
 from app.core.segment import UtteranceBuffer
 from app.core.summarizer import SummaryScheduler
 from app.db.database import SessionLocal
@@ -41,18 +42,20 @@ class MeetingSession:
 
         self.asr = FunasrClient(
             url=settings.funasr_ws_url,
-            hotwords=settings.funasr_hotwords,
+            hotwords=load_hotwords(),
             on_online=self._on_asr_online,
             on_offline=self._on_asr_offline,
             on_error=self._on_asr_error,
             on_closed=self._on_asr_closed,
         )
         self.scheduler = SummaryScheduler(self)
+        self.roller = RollingEnhancer(self)
 
         self.paused = False  # 前端暂停：丢弃上行音频（连接保持）
         self.final_title = ""
         self.final_attributes: list[dict] = []  # 累积的事实性属性（key 去重合并）
         self.spk_threshold: float = 0.55  # 说话人聚类阈值，前端可调
+        self.speaker_count: int = 0  # 参会人数（前端填写，0=自动估计），会末重标注 oracle
         self._audio = bytearray()  # 累计上行 PCM（int16/16kHz/mono），结束时写 wav
 
     # ---------- 生命周期 ----------
@@ -83,6 +86,15 @@ class MeetingSession:
         except (TimeoutError, asyncio.TimeoutError):
             logger.warning("meeting %s: asr close timeout", self.meeting_id)
 
+        # 等在飞的滚动增强一轮跑完（上限 30s，超时放弃）
+        try:
+            if self.roller._task is not None:
+                await asyncio.wait_for(asyncio.shield(self.roller._task), timeout=30)
+        except (TimeoutError, asyncio.TimeoutError):
+            logger.warning("meeting %s: rolling round timeout on stop", self.meeting_id)
+        except Exception:
+            pass
+
         # 收尾：最终总结 + 剩余尾巴属性提取（scheduler.stop 里做了），最后落库 title/attributes
         await self.scheduler.stop(final_summary=True)
 
@@ -103,6 +115,12 @@ class MeetingSession:
 
         await self.broadcast({"type": "ended", "meeting_id": self.meeting_id})
         logger.info("meeting %s ended", self.meeting_id)
+
+        # 会末重标注（异步，不阻塞 ended；阿里 pipeline 切分 + ERes2NetV2 标身份）
+        from app.core.reannotate import reannotate
+
+        pcm = bytes(self._audio)
+        asyncio.create_task(reannotate(self.meeting_id, pcm, speaker_count=self.speaker_count))
 
     async def handle_audio(self, pcm: bytes) -> None:
         if self._stopped or self.paused:
@@ -144,6 +162,10 @@ class MeetingSession:
             "start_ms": item.start_ms,
             "end_ms": item.end_ms,
         })
+
+        # 滚动增强：句终驱动，攒够窗口后打标+纠错（后台执行不阻塞）
+        if item.start_ms > 0 or item.end_ms > 0:
+            self.roller.on_utterance(item.start_ms, item.end_ms, item.seq)
 
     async def _on_asr_error(self, msg: str) -> None:
         await self.broadcast({"type": "error", "message": msg})
@@ -209,6 +231,8 @@ class MeetingSession:
         # 滚动上下文 = 旧摘要 + 本段要点，截断防膨胀
         combined = self.prev_summary + "\n" + "\n".join(f"· {p}" for p in result["points"])
         self.prev_summary = combined.strip()[-2000:]
+        # 纠错器用最新纪要当全局上下文
+        self.buffer.set_summary_hint(self.prev_summary)
         self.summary_seq += 1
 
         async with SessionLocal() as db:

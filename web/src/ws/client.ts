@@ -4,6 +4,7 @@ export type ServerMessage =
   | { type: 'started'; meeting_id: string }
   | { type: 'transcript_online'; text: string }
   | { type: 'transcript'; seq: number; speaker: string; text: string; start_ms: number; end_ms: number }
+  | { type: 'transcript_update'; seq: number; speaker: string; text: string; start_ms: number; end_ms: number }
   | { type: 'summary'; seq: number; final: boolean; title: string; points: string[]; action_items: unknown[]; attributes: unknown[] }
   | { type: 'attributes'; title: string; attributes: { key: string; value: string }[] }
   | { type: 'ended'; meeting_id: string }
@@ -26,9 +27,10 @@ export class MeetingWs {
     return this.ws?.readyState === WebSocket.OPEN
   }
 
-  start(title: string, spkThreshold?: number): void {
+  start(title: string, spkThreshold?: number, speakerCount?: number): void {
     const payload: Record<string, unknown> = { type: 'start', title }
     if (spkThreshold !== undefined) payload.spk_threshold = spkThreshold
+    if (speakerCount !== undefined && speakerCount > 0) payload.speaker_count = speakerCount
     this.ws?.send(JSON.stringify(payload))
   }
 

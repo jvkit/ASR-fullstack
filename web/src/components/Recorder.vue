@@ -1,16 +1,15 @@
 <script setup lang="ts">
 import { reactive } from 'vue'
-import { QuestionFilled } from '@element-plus/icons-vue'
 
-const props = defineProps<{ recording: boolean; paused: boolean }>()
+const props = defineProps<{ recording: boolean; paused: boolean; insecure: boolean }>()
 const emit = defineEmits<{
-  start: [payload: { title: string; spkThreshold: number }]
+  start: [payload: { title: string; spkThreshold: number; speakerCount: number }]
   pause: []
   resume: []
   stop: []
 }>()
 
-const form = reactive({ title: '未命名会议', spkThreshold: 0.55 })
+const form = reactive({ title: '未命名会议', spkThreshold: 0.55, speakerCount: 0 })
 
 function start() {
   if (!form.title.trim()) return
@@ -18,6 +17,8 @@ function start() {
   emit('start', {
     title: form.title.trim(),
     spkThreshold: Number.isFinite(thr) && thr > 0 && thr < 1 ? thr : 0.55,
+    // 0 = 不指定（后端自动估计）；>0 = 明确告知参会人数
+    speakerCount: Number.isFinite(form.speakerCount) && form.speakerCount > 0 ? Math.floor(form.speakerCount) : 0,
   })
 }
 
@@ -27,38 +28,66 @@ function togglePause() {
 </script>
 
 <template>
-  <el-card shadow="never">
-    <el-form inline @submit.prevent>
-      <el-form-item label="会议标题">
-        <el-input v-model="form.title" :disabled="recording" style="width: 220px" />
-      </el-form-item>
-      <el-form-item label="说话人阈值">
-        <el-input-number
-          v-model="form.spkThreshold"
+  <van-cell-group inset class="recorder">
+    <van-field
+      v-model="form.title"
+      label="会议标题"
+      placeholder="未命名会议"
+      :disabled="recording"
+    />
+    <van-field label="说话人阈值">
+      <template #input>
+        <van-stepper
+          :model-value="form.spkThreshold"
           :min="0.3"
           :max="0.95"
           :step="0.05"
-          :precision="2"
+          :decimal-length="2"
           :disabled="recording"
-          style="width: 110px"
+          @change="(v: number) => (form.spkThreshold = v)"
         />
-      </el-form-item>
-      <el-tooltip
-        content="越高越严格（不同人更难被合并为同一人），越低越宽松。分不出人→调高；把一个人拆成多个→调低"
-        placement="top"
-      >
-        <el-icon v-if="!recording" style="color: #909399; align-self: center"><QuestionFilled /></el-icon>
-      </el-tooltip>
-      <el-form-item>
-        <el-button v-if="!recording" type="danger" @click="start">● 开始记录</el-button>
-        <template v-else>
-          <el-button type="warning" @click="togglePause">{{ paused ? '继续' : '暂停' }}</el-button>
-          <el-button type="info" @click="emit('stop')">■ 结束会议</el-button>
-        </template>
-      </el-form-item>
-      <el-tag v-if="recording" :type="paused ? 'info' : 'danger'" effect="dark">
-        {{ paused ? 'PAUSED' : 'REC' }}
-      </el-tag>
-    </el-form>
-  </el-card>
+        <span class="thr-tip">高=更严格不易并人，低=更宽松</span>
+      </template>
+    </van-field>
+    <van-field label="参会人数">
+      <template #input>
+        <van-stepper
+          v-model="form.speakerCount"
+          :min="0"
+          :max="15"
+          :integer="true"
+          :disabled="recording"
+        />
+        <span class="thr-tip">0=自动估计；填真实人数可显著提升说话人区分</span>
+      </template>
+    </van-field>
+
+    <div class="actions">
+      <template v-if="!recording">
+        <van-button type="danger" round block :disabled="insecure" @click="start">
+          ● 开始记录
+        </van-button>
+      </template>
+      <template v-else>
+        <div class="rec-row">
+          <van-tag :type="paused ? 'default' : 'danger'" size="large" class="rec-tag">
+            {{ paused ? '已暂停' : 'REC' }}
+          </van-tag>
+          <van-button type="warning" round @click="togglePause">
+            {{ paused ? '继续' : '暂停' }}
+          </van-button>
+          <van-button type="danger" round @click="emit('stop')">■ 结束会议</van-button>
+        </div>
+      </template>
+    </div>
+  </van-cell-group>
 </template>
+
+<style scoped>
+.recorder { margin-bottom: 8px; }
+.actions { padding: 8px 16px 16px; }
+.rec-row { display: flex; align-items: center; gap: 12px; justify-content: flex-end; }
+.rec-tag { flex: 1; }
+.thr-tip { font-size: 12px; color: #969799; margin-left: 8px; }
+@media (min-width: 768px) { .rec-tag { flex: 0; min-width: 80px; } }
+</style>

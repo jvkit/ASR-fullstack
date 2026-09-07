@@ -55,6 +55,13 @@ async def meeting_ws(ws: WebSocket) -> None:
                 session.spk_threshold = thr
         except (TypeError, ValueError):
             pass
+        # 参会人数（前端可填，0=自动估计）：会末重标注用它做 oracle，显著提升区分效果
+        try:
+            sc = int(ctrl.get("speaker_count") or 0)
+            if 1 <= sc <= 15:
+                session.speaker_count = sc
+        except (TypeError, ValueError):
+            pass
         session.clients.add(ws)
         await session.start()
         await ws.send_text(json.dumps({"type": "started", "meeting_id": session.meeting_id}))

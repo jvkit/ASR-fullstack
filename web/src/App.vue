@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from 'vue'
+import { showToast } from 'vant'
 
 import LiveTranscript from './components/LiveTranscript.vue'
 import MeetingDetail from './components/MeetingDetail.vue'
@@ -30,6 +31,7 @@ type View = 'live' | 'list' | 'detail' | 'speakers'
 const view = ref<View>('live')
 const detailMeetingId = ref('')
 const meetingCount = ref(0) // 列表页有新会议时点亮 tab 角标
+const insecure = ref(false) // http 非安全上下文：浏览器禁止麦克风
 
 const recording = ref(false)
 const paused = ref(false)
@@ -67,6 +69,15 @@ function handleMessage(msg: ServerMessage) {
       utterances.value.push({ seq: msg.seq, speaker: msg.speaker || '发言人', text: msg.text })
       colorOf(msg.speaker || '发言人')
       break
+    case 'transcript_update': {
+      // 滚动打标/纠错回写：按 seq 原地替换说话人与文本
+      const idx = utterances.value.findIndex((u) => u.seq === msg.seq)
+      if (idx >= 0) {
+        utterances.value[idx] = { seq: msg.seq, speaker: msg.speaker || '发言人', text: msg.text }
+        colorOf(msg.speaker || '发言人')
+      }
+      break
+    }
     case 'summary':
       summaries.value.push({
         seq: msg.seq,
@@ -87,11 +98,16 @@ function handleMessage(msg: ServerMessage) {
       break
     case 'error':
       errorMsg.value = msg.message
+      showToast({ message: msg.message, type: 'fail', duration: 4000 })
       break
   }
 }
 
-async function onStart(payload: { title: string; spkThreshold: number }) {
+async function onStart(payload: { title: string; spkThreshold: number; speakerCount: number }) {
+  if (insecure.value) {
+    showToast({ message: 'http 访问下浏览器禁止麦克风，请用 https 地址打开', type: 'fail', duration: 4000 })
+    return
+  }
   errorMsg.value = ''
   utterances.value = []
   summaries.value = []
@@ -102,10 +118,24 @@ async function onStart(payload: { title: string; spkThreshold: number }) {
   await ws.connect()
   ws.onMessage(handleMessage)
   // 先开麦（拿到 onPcm 回调），再 start —— 回调里检查 ws.ready 防竞态
-  await mic.start((bytes) => {
-    if (ws.ready && !paused.value) ws.sendPcm(bytes)
-  })
-  ws.start(payload.title, payload.spkThreshold)
+  try {
+    await mic.start((bytes) => {
+      if (ws.ready && !paused.value) ws.sendPcm(bytes)
+    })
+  } catch (e) {
+    const name = (e as DOMException)?.name
+    showToast({
+      message:
+        name === 'NotAllowedError'
+          ? '麦克风权限被拒绝：请到浏览器设置里允许本页使用麦克风'
+          : `无法打开麦克风：${e}`,
+      type: 'fail',
+      duration: 5000,
+    })
+    ws.close()
+    return
+  }
+  ws.start(payload.title, payload.spkThreshold, payload.speakerCount || undefined)
   recording.value = true
 }
 
@@ -133,57 +163,55 @@ function openDetail(id: string) {
   detailMeetingId.value = id
   view.value = 'detail'
 }
+
+onMounted(() => {
+  if (typeof navigator !== 'undefined' && navigator.mediaDevices === undefined) {
+    insecure.value = true
+  }
+})
 </script>
 
 <template>
-  <el-container style="height: 100vh">
-    <el-header style="border-bottom: 1px solid #eee; display: flex; align-items: center; gap: 16px">
-      <h2 style="margin: 0">会议实时纪要</h2>
-      <el-radio-group v-model="view" size="default">
-        <el-radio-button value="live">实时记录</el-radio-button>
-        <el-radio-button value="speakers">声纹管理</el-radio-button>
-        <el-radio-button value="list">
-          <el-badge :value="meetingCount" :hidden="!meetingCount" :offset="[-4, 2]">历史会议</el-badge>
-        </el-radio-button>
-      </el-radio-group>
-      <el-alert
-        v-if="errorMsg"
-        :title="errorMsg"
-        type="error"
-        :closable="false"
-        style="max-width: 360px"
-      />
-    </el-header>
+  <div class="app-shell">
+    <!-- 桌面端：顶部导航；移动端：顶部仅标题，导航在底部 tabbar -->
+    <van-nav-bar :title="view === 'detail' ? '会议详情' : '会议实时纪要'" />
 
-    <el-main>
+    <van-notice-bar
+      v-if="insecure"
+      mode="closeable"
+      color="#fff"
+      background="#e64340"
+      wrapable
+      :scrollable="false"
+      text="当前为 http 访问，浏览器禁止使用麦克风。请用 https:// 开头的地址访问（首次有证书警告，点继续访问即可）"
+    />
+
+    <main class="app-main">
       <!-- 实时记录视图 -->
       <template v-if="view === 'live'">
-        <Recorder :recording="recording" :paused="paused" @start="onStart" @pause="onPause" @resume="onResume" @stop="onStop" />
+        <Recorder :recording="recording" :paused="paused" :insecure="insecure" @start="onStart" @pause="onPause" @resume="onResume" @stop="onStop" />
 
-        <div v-if="liveAttrs.length" style="margin-top: 12px">
-          <el-tag
+        <div v-if="liveAttrs.length" class="live-attrs">
+          <van-tag
             v-for="a in liveAttrs"
             :key="a.key"
-            effect="plain"
-            style="margin-right: 8px"
+            plain
+            type="primary"
+            class="attr-tag"
           >
             {{ a.key }}：{{ a.value }}
-          </el-tag>
+          </van-tag>
         </div>
 
-        <el-row :gutter="16" style="margin-top: 16px">
-          <el-col :span="14">
-            <LiveTranscript
-              :utterances="utterances"
-              :online-text="onlineText"
-              :speakers="knownSpeakers"
-              :color-of="colorOf"
-            />
-          </el-col>
-          <el-col :span="10">
-            <SummaryPanel :summaries="summaries" :meeting-id="meetingId" />
-          </el-col>
-        </el-row>
+        <div class="live-panels">
+          <LiveTranscript
+            :utterances="utterances"
+            :online-text="onlineText"
+            :speakers="knownSpeakers"
+            :color-of="colorOf"
+          />
+          <SummaryPanel :summaries="summaries" :meeting-id="meetingId" />
+        </div>
       </template>
 
       <!-- 历史会议列表 -->
@@ -198,6 +226,33 @@ function openDetail(id: string) {
         :meeting-id="detailMeetingId"
         @back="view = 'list'"
       />
-    </el-main>
-  </el-container>
+    </main>
+
+    <!-- 移动端底部导航（桌面端隐藏，桌面用顶部 radio-group） -->
+    <van-tabbar v-model="view" class="mobile-tabbar">
+      <van-tabbar-item name="live" icon="edit">实时记录</van-tabbar-item>
+      <van-tabbar-item name="speakers" icon="contact">声纹管理</van-tabbar-item>
+      <van-tabbar-item name="list" icon="records" :badge="meetingCount || ''">历史会议</van-tabbar-item>
+    </van-tabbar>
+  </div>
 </template>
+
+<style>
+html, body, #app { height: 100%; margin: 0; }
+.app-shell { height: 100vh; display: flex; flex-direction: column; }
+.app-main { flex: 1; overflow-y: auto; padding: 8px; }
+
+/* 移动端：单列布局 */
+.live-panels { display: flex; flex-direction: column; gap: 8px; }
+.live-attrs { padding: 4px 2px; display: flex; flex-wrap: wrap; gap: 6px; }
+.attr-tag { margin: 0; }
+
+/* 桌面端（≥768px）：恢复左右分栏 + 顶部 radio 导航 + 隐藏 tabbar */
+@media (min-width: 768px) {
+  .mobile-tabbar { display: none; }
+  .app-main { padding: 16px; }
+  .live-panels { flex-direction: row; }
+  .live-panels > :first-child { flex: 7; }
+  .live-panels > :last-child { flex: 5; }
+}
+</style>

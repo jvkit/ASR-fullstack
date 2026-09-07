@@ -21,6 +21,8 @@ class Meeting(Base):
     ended_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     # 结束时 AI 全文提取的事实性属性：JSON list[{"key","value"}]（主题/时间外的动态字段）
     attributes: Mapped[str] = mapped_column(Text, default="")
+    # 会末重标注是否完成（阿里 pipeline 切分 + ERes2NetV2 声纹标身份）
+    reannotated: Mapped[bool] = mapped_column(default=False)
 
 
 class Utterance(Base):
@@ -51,4 +53,18 @@ class Summary(Base):
     action_items: Mapped[str] = mapped_column(Text, default="[]")  # JSON list
     attributes: Mapped[str] = mapped_column(Text, default="[]")  # 本段事实性属性 JSON list
     title: Mapped[str] = mapped_column(String(200), default="")  # 本段标题
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+
+
+class ReAnnotateUtterance(Base):
+    """会末重标注版句子：阿里 pipeline 切分 + ERes2NetV2 声纹标身份（与实时版并存）。"""
+
+    __tablename__ = "utterances_re"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    meeting_id: Mapped[str] = mapped_column(String(36), index=True)
+    seq: Mapped[int] = mapped_column(Integer)  # 会议内序号
+    speaker: Mapped[str] = mapped_column(String(32), default="")  # 注册名 / 说话人N
+    start_ms: Mapped[int] = mapped_column(Integer, default=0)
+    end_ms: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)

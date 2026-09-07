@@ -26,36 +26,44 @@ watch(
 </script>
 
 <template>
-  <el-card shadow="never" style="height: 70vh; display: flex; flex-direction: column">
-    <template #header>
-      <div style="display: flex; align-items: center; gap: 12px">
-        <span>实时转写</span>
-        <el-tag
-          v-for="spk in speakers"
-          :key="spk"
-          size="small"
-          :style="{ backgroundColor: colorOf(spk), color: '#fff', border: 'none' }"
-        >
-          {{ spk }}
-        </el-tag>
-      </div>
+  <van-cell-group inset class="panel">
+    <template #title>
+      <span>实时转写</span>
+      <van-tag
+        v-for="spk in speakers"
+        :key="spk"
+        size="medium"
+        class="spk-tag"
+        :style="{ backgroundColor: colorOf(spk), color: '#fff', border: 'none' }"
+      >
+        {{ spk }}
+      </van-tag>
     </template>
 
-    <div ref="listEl" style="flex: 1; overflow-y: auto">
-      <div v-for="u in utterances" :key="u.seq" style="margin-bottom: 10px">
-        <el-tag
-          size="small"
-          effect="plain"
+    <div ref="listEl" class="list">
+      <div v-for="u in utterances" :key="u.seq" class="utt">
+        <van-tag
+          size="medium"
+          plain
+          class="spk-tag"
           :style="{ borderColor: colorOf(u.speaker), color: colorOf(u.speaker) }"
         >
           {{ u.speaker }}
-        </el-tag>
-        <span style="margin-left: 8px">{{ u.text }}</span>
+        </van-tag>
+        <span class="utt-text">{{ u.text }}</span>
       </div>
-      <div v-if="onlineText" style="color: #999; font-style: italic">
-        {{ onlineText }}…
-      </div>
-      <el-empty v-if="!utterances.length && !onlineText" description="开始说话后将实时显示转写" />
+      <div v-if="onlineText" class="online">{{ onlineText }}…</div>
+      <van-empty v-if="!utterances.length && !onlineText" description="开始说话后将实时显示转写" />
     </div>
-  </el-card>
+  </van-cell-group>
 </template>
+
+<style scoped>
+.panel { display: flex; flex-direction: column; }
+.list { height: 40vh; overflow-y: auto; padding: 8px 16px; }
+.utt { margin-bottom: 10px; display: flex; align-items: baseline; gap: 8px; }
+.utt-text { flex: 1; word-break: break-word; }
+.spk-tag { flex-shrink: 0; }
+.online { color: #999; font-style: italic; padding-left: 2px; }
+@media (min-width: 768px) { .list { height: 60vh; } }
+</style>

@@ -1,8 +1,10 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
+import { showToast } from 'vant'
 
 interface Attr { key: string; value: string }
 interface Utterance { seq: number; speaker: string; text: string }
+interface ReSeg { seq: number; speaker: string; start_ms: number; end_ms: number }
 interface SummaryRow {
   seq: number
   title: string
@@ -19,6 +21,9 @@ const attrs = ref<Attr[]>([])
 const startedAt = ref('')
 const audioUrl = ref('')
 const utterances = ref<Utterance[]>([])
+const reSegs = ref<ReSeg[]>([])
+const reLoading = ref(false)
+const reSpeakerCount = ref(0) // 手动重标注时可选指定人数（0=自动）
 const summaries = ref<SummaryRow[]>([])
 const loading = ref(true)
 
@@ -43,10 +48,25 @@ async function load() {
     startedAt.value = detail.started_at || ''
     audioUrl.value = detail.audio_url || ''
     utterances.value = detail.utterances || []
+    reSegs.value = detail.utterances_re || []
     summaries.value = (sumResp as SummaryRow[]) || []
   } finally {
     loading.value = false
   }
+}
+
+async function rerunReannotate() {
+  reLoading.value = true
+  try {
+    await fetch(`/api/meetings/${props.meetingId}/reannotate?speaker_count=${reSpeakerCount.value || 0}`, { method: 'POST' })
+    await load()
+  } finally {
+    reLoading.value = false
+  }
+}
+
+function fmtSec(ms: number): string {
+  return `${Math.floor(ms / 1000)}s`
 }
 
 onMounted(load)
@@ -64,86 +84,116 @@ async function downloadMarkdown() {
 </script>
 
 <template>
-  <el-card shadow="never">
-    <template #header>
-      <div style="display: flex; align-items: center; gap: 12px">
-        <el-button size="small" @click="emit('back')">← 返回列表</el-button>
-        <span style="flex: 1; font-weight: 600">{{ title || '未命名会议' }}</span>
-        <el-button size="small" type="primary" :loading="loading" @click="downloadMarkdown">
-          下载 Markdown
-        </el-button>
-      </div>
-    </template>
-
-    <div v-loading="loading" style="max-height: calc(100vh - 180px); overflow-y: auto; padding-right: 8px">
-      <!-- 会议信息：固定字段 + AI 提取的动态属性 -->
-      <el-descriptions :column="2" border size="small" style="margin-bottom: 16px">
-        <el-descriptions-item label="开始时间">{{ startedAt ? new Date(startedAt).toLocaleString('zh-CN') : '-' }}</el-descriptions-item>
-        <el-descriptions-item label="状态">
-          <el-tag size="small" :type="summaries.some((s) => s.seq === 0) ? 'primary' : 'info'">已结束</el-tag>
-        </el-descriptions-item>
-        <el-descriptions-item
-          v-for="a in attrs"
-          :key="a.key"
-          :label="a.key"
-          :span="2"
-        >
-          {{ a.value }}
-        </el-descriptions-item>
-      </el-descriptions>
-
-      <h4 style="margin: 16px 0 8px">录音回放</h4>
-      <audio v-if="audioUrl" controls :src="audioUrl" style="width: 100%; margin-bottom: 8px"></audio>
-      <el-text v-else type="info" size="small">本场会议无录音（老会议或录音未落盘）</el-text>
-
-      <h4 style="margin: 16px 0 8px">逐句转写</h4>
-      <div v-for="u in utterances" :key="u.seq" style="margin-bottom: 8px">
-        <el-tag
-          size="small"
-          effect="plain"
-          :style="{ borderColor: colorOf(u.speaker), color: colorOf(u.speaker) }"
-        >
-          {{ u.speaker || '发言人' }}
-        </el-tag>
-        <span style="margin-left: 8px">{{ u.text }}</span>
-      </div>
-      <el-empty v-if="!utterances.length" description="本场会议没有有效转写" />
-
-      <h4 style="margin: 24px 0 8px">总结</h4>
-      <el-timeline v-if="summaries.length">
-        <el-timeline-item
-          v-for="s in summaries"
-          :key="s.seq"
-          :timestamp="`第 ${s.seq} 段`"
-        >
-          <h5 style="margin: 0 0 6px">{{ s.title || `段落 ${s.seq}` }}</h5>
-          <div v-html="s.content"></div>
-          <div v-if="s.attributes.length" style="margin-top: 6px">
-            <el-tag
-              v-for="a in s.attributes"
-              :key="a.key"
-              size="small"
-              effect="plain"
-              style="margin-right: 6px"
-            >
-              {{ a.key }}：{{ a.value }}
-            </el-tag>
-          </div>
-          <div v-if="s.action_items.length" style="margin-top: 6px">
-            <el-tag
-              v-for="(a, i) in s.action_items"
-              :key="i"
-              size="small"
-              type="warning"
-              effect="plain"
-              style="margin: 2px 4px 2px 0"
-            >
-              {{ a.who }}：{{ a.what }}{{ a.due ? `（${a.due}）` : '' }}
-            </el-tag>
-          </div>
-        </el-timeline-item>
-      </el-timeline>
-      <el-empty v-else description="暂无总结" />
+  <div class="detail" v-loading="loading">
+    <div class="detail-head">
+      <van-button size="small" plain @click="emit('back')">← 返回</van-button>
+      <span class="detail-title">{{ title || '未命名会议' }}</span>
+      <van-button size="small" type="primary" @click="downloadMarkdown">下载纪要</van-button>
     </div>
-  </el-card>
+
+    <van-cell-group inset class="block" title="会议信息">
+      <van-cell title="开始时间" :value="startedAt ? new Date(startedAt).toLocaleString('zh-CN') : '-'" />
+      <van-cell title="状态" value="已结束" />
+      <van-cell v-for="a in attrs" :key="a.key" :title="a.key" :value="a.value" />
+    </van-cell-group>
+
+    <van-cell-group inset class="block" title="录音回放">
+      <div class="audio-wrap">
+        <audio v-if="audioUrl" controls :src="audioUrl" class="audio-el"></audio>
+        <van-empty v-else description="本场会议无录音" image-size="64" />
+      </div>
+    </van-cell-group>
+
+    <van-cell-group inset class="block" title="说话人重标注（会末离线版）">
+      <div v-if="reSegs.length" class="re-seg-head">
+        <span class="re-seg-tip">人数：</span>
+        <van-stepper
+          v-model="reSpeakerCount"
+          :min="0"
+          :max="15"
+          :integer="true"
+          theme="primary"
+          style="margin-right: 8px"
+        />
+        <van-button size="small" plain type="primary" :loading="reLoading" @click="rerunReannotate">
+          重新标注
+        </van-button>
+      </div>
+      <div v-if="reSegs.length" class="re-segs">
+        <van-tag
+          v-for="s in reSegs"
+          :key="s.seq"
+          plain
+          :type="s.speaker ? 'success' : 'default'"
+          class="re-tag"
+        >
+          [{{ fmtSec(s.start_ms) }}] {{ s.speaker || '未识别' }}
+        </van-tag>
+      </div>
+      <van-empty v-else description="尚未生成重标注（结束数分钟后自动完成，或手动触发）" image-size="64" />
+    </van-cell-group>
+
+    <van-cell-group inset class="block" title="逐句转写（实时版）">
+      <div class="utts">
+        <div v-for="u in utterances" :key="u.seq" class="utt">
+          <van-tag
+            plain
+            class="spk-tag"
+            :style="{ borderColor: colorOf(u.speaker), color: colorOf(u.speaker) }"
+          >
+            {{ u.speaker || '发言人' }}
+          </van-tag>
+          <span class="utt-text">{{ u.text }}</span>
+        </div>
+        <van-empty v-if="!utterances.length" description="本场会议没有有效转写" image-size="64" />
+      </div>
+    </van-cell-group>
+
+    <van-cell-group inset class="block" title="总结">
+      <div class="sums">
+        <div v-for="s in summaries" :key="s.seq" class="sum-item">
+          <div class="sum-head">
+            <van-tag :type="s.seq === 0 ? 'primary' : 'success'">{{ s.seq === 0 ? '最终总结' : `第 ${s.seq} 段` }}</van-tag>
+            <span class="sum-title">{{ s.title || `段落 ${s.seq}` }}</span>
+          </div>
+          <div class="sum-content" v-html="s.content"></div>
+          <div v-if="s.attributes.length" class="tags">
+            <van-tag v-for="a in s.attributes" :key="a.key" plain type="primary" class="tag">
+              {{ a.key }}：{{ a.value }}
+            </van-tag>
+          </div>
+          <div v-if="s.action_items.length" class="tags">
+            <van-tag v-for="(a, i) in s.action_items" :key="i" plain type="warning" class="tag">
+              {{ a.who }}：{{ a.what }}{{ a.due ? `（${a.due}）` : '' }}
+            </van-tag>
+          </div>
+        </div>
+        <van-empty v-if="!summaries.length" description="暂无总结" image-size="64" />
+      </div>
+    </van-cell-group>
+  </div>
 </template>
+
+<style scoped>
+.detail { padding-bottom: 16px; }
+.detail-head { display: flex; align-items: center; gap: 8px; padding: 4px 8px 8px; }
+.detail-title { flex: 1; font-weight: 600; font-size: 15px; word-break: break-word; }
+.block { margin-top: 12px; }
+.audio-wrap { padding: 8px 16px; }
+.audio-el { width: 100%; }
+.re-seg-head { padding: 4px 16px; display: flex; align-items: center; }
+.re-seg-tip { font-size: 13px; color: #646566; }
+.re-segs { padding: 4px 16px 12px; display: flex; flex-wrap: wrap; gap: 4px; }
+.re-tag { margin: 0; }
+.utts { padding: 8px 16px; }
+.utt { margin-bottom: 10px; display: flex; align-items: baseline; gap: 8px; }
+.utt-text { flex: 1; word-break: break-word; }
+.spk-tag { flex-shrink: 0; }
+.sums { padding: 8px 16px; }
+.sum-item { margin-bottom: 16px; }
+.sum-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.sum-title { font-weight: 600; font-size: 14px; }
+.sum-content { font-size: 14px; }
+.tags { margin-top: 6px; display: flex; flex-wrap: wrap; gap: 4px; }
+.tag { margin: 0; }
+</style>

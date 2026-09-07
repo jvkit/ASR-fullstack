@@ -95,3 +95,8 @@ async def extract_final_attributes(full_text: str) -> dict:
         logger.exception("extract_final_attributes failed")
         return {"title": "", "attributes": []}
 
+
+def build_correction_messages(context: str, summary: str, window_text: str) -> list[dict]:
+    """纠错提示词构造（供 roller 调用），保持 prompts 单点维护。"""
+    return prompts.build_correction_messages(context, summary, window_text)
+

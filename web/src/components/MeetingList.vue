@@ -15,47 +15,48 @@ const emit = defineEmits<{ open: [id: string] }>()
 const meetings = ref<MeetingRow[]>([])
 const loading = ref(true)
 
-async function load() {
-  loading.value = true
+function fmt(row: MeetingRow): string {
+  if (!row.started_at) return '-'
+  return new Date(row.started_at).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
+}
+
+function dur(row: MeetingRow): string {
+  if (row.started_at && row.ended_at) {
+    return `${Math.round((Date.parse(row.ended_at) - Date.parse(row.started_at)) / 60000)} 分钟`
+  }
+  return '进行中'
+}
+
+onMounted(async () => {
   try {
     const resp = await fetch('/api/meetings')
     meetings.value = (await resp.json()) as MeetingRow[]
   } finally {
     loading.value = false
   }
-}
-
-onMounted(load)
+})
 </script>
 
 <template>
-  <el-card shadow="never">
-    <template #header>
-      <div style="display: flex; align-items: center">
-        <span style="flex: 1">历史会议</span>
-        <el-button size="small" :loading="loading" @click="load">刷新</el-button>
-      </div>
-    </template>
-
-    <el-table :data="meetings" v-loading="loading" @row-click="(r) => emit('open', r.id)">
-      <el-table-column prop="title" label="标题" min-width="180" />
-      <el-table-column label="开始时间" width="160">
-        <template #default="{ row }">
-          {{ row.started_at ? new Date(row.started_at).toLocaleString('zh-CN') : '-' }}
+  <div v-loading="loading">
+    <van-cell-group inset title="历史会议（点击查看详情）">
+      <van-empty v-if="!meetings.length && !loading" description="暂无会议" />
+      <van-cell
+        v-for="m in meetings"
+        :key="m.id"
+        :title="m.title || '未命名会议'"
+        is-link
+        @click="emit('open', m.id)"
+      >
+        <template #label>
+          {{ fmt(m) }} · {{ dur(m) }}
         </template>
-      </el-table-column>
-      <el-table-column label="时长" width="110">
-        <template #default="{ row }">
-          {{ row.started_at && row.ended_at ? Math.round((Date.parse(row.ended_at) - Date.parse(row.started_at)) / 60000) + ' 分钟' : '进行中' }}
+        <template #value>
+          <van-tag :type="m.status === 'live' ? 'danger' : 'default'">
+            {{ m.status === 'live' ? '进行中' : '已结束' }}
+          </van-tag>
         </template>
-      </el-table-column>
-      <el-table-column label="状态" width="90">
-        <template #default="{ row }">
-          <el-tag :type="row.status === 'live' ? 'danger' : 'info'">
-            {{ row.status === 'live' ? '进行中' : '已结束' }}
-          </el-tag>
-        </template>
-      </el-table-column>
-    </el-table>
-  </el-card>
+      </van-cell>
+    </van-cell-group>
+  </div>
 </template>

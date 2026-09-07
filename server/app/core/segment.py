@@ -72,6 +72,29 @@ class UtteranceBuffer:
             lines = [f"{it.speaker or '发言人'}: {it.text}" for it in self._all]
             return "\n".join(lines)[:max_chars]
 
+    async def items_in(self, start_ms: int, end_ms: int) -> list[UtteranceItem]:
+        """时间区间 [start_ms, end_ms) 内的句子（滚动打标贴段用）。"""
+        async with self._lock:
+            return [
+                it for it in self._all
+                if it.start_ms < end_ms and it.end_ms > start_ms
+            ]
+
+    async def items_by_seqs(self, seqs: list[int]) -> list[UtteranceItem]:
+        """按 seq 取句子（滚动纠错窗口用），保持 seq 升序。"""
+        want = set(seqs)
+        async with self._lock:
+            return [it for it in self._all if it.seq in want]
+
+    async def recent_summary_hint(self) -> str:
+        """最近一次总结要点（纠错时给 LLM 当全局上下文）。"""
+        # 由 session 注入（避免循环引用），返回缓存的 prev_summary
+        hint = getattr(self, "_summary_hint", "")
+        return str(hint)
+
+    def set_summary_hint(self, hint: str) -> None:
+        self._summary_hint = hint
+
     async def drain_text(self, max_chars: int) -> str:
         """取走并格式化为「说话人: 内容」，超出 max_chars 的部分留下次。"""
         items = await self.drain()

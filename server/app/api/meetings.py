@@ -9,7 +9,7 @@ from sqlalchemy import select
 
 from app.config import settings
 from app.db.database import SessionLocal
-from app.db.models import Meeting, Summary, Utterance
+from app.db.models import Meeting, ReAnnotateUtterance, Summary, Utterance
 
 router = APIRouter(prefix="/api", tags=["meetings"])
 
@@ -27,6 +27,7 @@ async def list_meetings(limit: int = 50) -> list[dict]:
                 "started_at": m.started_at.isoformat() if m.started_at else None,
                 "ended_at": m.ended_at.isoformat() if m.ended_at else None,
                 "attributes": json.loads(m.attributes or "[]"),
+                "reannotated": bool(m.reannotated),
             }
             for m in rows
         ]
@@ -41,6 +42,10 @@ async def meeting_detail(meeting_id: str) -> dict:
         utts = (await db.execute(
             select(Utterance).where(Utterance.meeting_id == meeting_id).order_by(Utterance.seq)
         )).scalars().all()
+        re_utts = (await db.execute(
+            select(ReAnnotateUtterance).where(ReAnnotateUtterance.meeting_id == meeting_id)
+            .order_by(ReAnnotateUtterance.seq)
+        )).scalars().all()
         return {
             "id": meeting.id,
             "title": meeting.title,
@@ -49,6 +54,7 @@ async def meeting_detail(meeting_id: str) -> dict:
             "started_at": meeting.started_at.isoformat() if meeting.started_at else None,
             "ended_at": meeting.ended_at.isoformat() if meeting.ended_at else None,
             "attributes": json.loads(meeting.attributes or "[]"),
+            "reannotated": bool(meeting.reannotated),
             # 有录音文件才有回放地址
             "audio_url": (
                 f"/api/meetings/{meeting_id}/audio"
@@ -60,7 +66,27 @@ async def meeting_detail(meeting_id: str) -> dict:
                  "start_ms": u.start_ms, "end_ms": u.end_ms}
                 for u in utts
             ],
+            # 会末重标注版（阿里 pipeline 切分 + ERes2NetV2 声纹标身份；无文字，段级时间）
+            "utterances_re": [
+                {"seq": u.seq, "speaker": u.speaker,
+                 "start_ms": u.start_ms, "end_ms": u.end_ms}
+                for u in re_utts
+            ],
         }
+
+
+@router.post("/meetings/{meeting_id}/reannotate")
+async def meeting_reannotate(meeting_id: str, speaker_count: int = 0) -> dict:
+    """手动触发会末重标注（历史会议补跑 / 失败重试）。speaker_count>0 时作为 oracle。"""
+    from app.core.reannotate import reannotate_for_meeting
+
+    async with SessionLocal() as db:
+        if not await db.get(Meeting, meeting_id):
+            raise HTTPException(404, "meeting not found")
+    started = await reannotate_for_meeting(meeting_id, speaker_count=speaker_count)
+    if not started:
+        raise HTTPException(404, "recording not found")
+    return {"ok": True, "meeting_id": meeting_id}
 
 
 @router.get("/meetings/{meeting_id}/audio")
