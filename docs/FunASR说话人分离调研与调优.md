@@ -86,7 +86,42 @@ res = model.generate(input="meeting.wav", batch_size_s=300)
 - FunASR 官方 diarization 模型族（SOND 中文 alimeeting、EEND-OLA）：
   若未来要换端到端 diarization 模型可从这里选，但需离线评估，当前组合已够用。
 
-## 七、遗留问题
+## 七、2026-09-07 实测对照：整段跑 vs 实时碎段
+
+把 `OddASR`（FunASR `AutoModel(spk_model="cam++")` 离线整段）和阿里
+`speech_campplus_speaker-diarization` pipeline 在 **gpu 服务器**上对同一批
+真实双人录音做整段对照。核心结论：
+
+1. **阿里 pipeline 传 `oracle=2`（确切人数）时完美分出 2 人**（45s 双人录音，
+   `offline_ali_diarize.py oddasr_test_2spk.wav 2`，10 段正确交替 spk0/spk1）。
+2. **阿里 pipeline 不传 oracle（自动估人数）时彻底失败**：4 条真实录音
+   （66s / 255s / 270s / 61s，实际均为 2 人）自动模式下分别分出 **3 / 3 / 1 / 1** 人，
+   0/4 全错。短音频自动估人数过于保守（45s 那次连 2 都没试出来）。
+   → **这就是我们「前端必须填参会人数」的根本原因**：阿里 pipeline 的
+   `oracle_num` 是单参数收益最大的一项。
+3. **OddASR 的流式 WS 不做说话人分离**：`odd_asr_stream.py` 里 `spk_model="cam++"`
+   被注释掉，实时路径只出文字；分人只在其**离线文件**模块
+   （`odd_asr_file.py`，`AutoModel` + `sentence_info` 的 `spk` 字段）里做。
+   → OddASR 的取舍与我们相反：**它放弃实时分人、专注离线整段分人**；
+   我们则是「实时碎段分人弱 + 滚动重标注 + 会末重标注」补齐。
+
+**对照脚本**（gpu 上跑，模型已缓存）：
+- `scripts/offline_whole_segment.py <wav> [preset_spk_num]` —— FunASR AutoModel 整段
+- `scripts/offline_ali_diarize.py <wav> [oracle_num]` —— 阿里 pipeline 整段
+
+## 八、项目实测结论（为什么两个都"没用"）
+
+| 项目 | 技术栈 | 与我们的差异 | 结论 |
+|---|---|---|---|
+| **OddASR** | FunASR + cam++，`preset_spk_num/max_num_spks/merge_thr/spk_mode` 四配置 | 离线整段分人准；流式 WS 不分人 | 分人思路与我们一致，但它**没有实时分人**，流式只出文字。其配置面板（指定人数/上限/阈值）与我们的配置面板思路重合，可互相印证 |
+| **Aham Voice** | macOS 本地：FunASR 离线转写 + CAM++ 分人 + emotion2vec 情绪，全离线 | 同样是 FunASR+cam++ 离线路线，无实时、无 pyannote | 印证「FunASR+cam++ 离线整段分人」可行；但不解决我们**实时多人**需求，仓库不可达，无借鉴价值 |
+
+**最终认知**：我们"实时分人弱"不是 bug，是**设计取舍**——官方/社区项目都靠
+**离线整段**换取分人准确率，没有一个开源项目同时做好"实时出字 + 实时分人"。
+我们的解法（滚动打标 + LLM 纠错 + 会末重标注）正是这些项目缺失的部分，
+方向是对的，不需要换框架。
+
+## 九、遗留问题
 
 - gpu FunASR 服务目前跑在 **CPU**（`--ngpu 0`），重启时注意参数保持一致。
 - `max_speakers` patch（`~/jvkit/asr/patch_max_speakers.py`，幂等）需重启 gpu
