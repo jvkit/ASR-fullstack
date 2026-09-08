@@ -19,7 +19,7 @@ class Settings(BaseSettings):
     # 会末重标注（gpu diarize 服务，v3 句子级声纹：/diarize_sent）
     diarize_http_url: str = "http://192.168.30.87:10096"  # ERes2NetV2 逐句声纹命名
     reannotate_min_sec: int = 10          # 短于此秒数不做重标注
-    reannotate_name_threshold: float = 0.50  # 重标注声纹匹配阈值。实测 0.40 会把 0.34~0.38 的无关段误吸成注册名（全 admin）；0.50 偏严但配合回写保护（匿名不覆盖注册名）可用
+    reannotate_name_threshold: float = 0.30  # 重标注声纹匹配阈值。注册人真实匹配分落在 0.44~0.61，0.50 会拒掉 0.47~0.49 的真匹配（被平滑继承成上一句说话人）；0.30 与 /diarize_sent 端点默认一致
 
     # LLM（内网 vLLM / mymodule 网关）
     llm_base_url: str = "http://127.0.0.1:4000/v1"
