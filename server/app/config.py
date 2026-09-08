@@ -22,6 +22,7 @@ class Settings(BaseSettings):
     reannotate_oracle_mode: str = "auto"  # 未填人数时的 oracle 策略：auto=让阿里自估 | registered=注册数+extra | auto_tune=按簇内紧度扫 2..6
     reannotate_max_oracle: int = 8        # 重标注人数上限
     reannotate_min_sec: int = 10          # 短于此秒数不做重标注
+    reannotate_name_threshold: float = 0.50  # 重标注声纹匹配阈值。实测 0.40 会把 0.34~0.38 的无关段误吸成注册名（全 admin）；0.50 偏严但配合回写保护（匿名不覆盖注册名）可用
     diarize_max_oracle: int = 8           # 阿里 pipeline 自动模式人数候选上限（自动估计时在 2..N 里挑）
 
     # LLM（内网 vLLM / mymodule 网关）

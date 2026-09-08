@@ -57,7 +57,7 @@ async def reannotate(meeting_id: str, pcm: bytes, speaker_count: int = 0) -> Non
             r = await cli.post(
                 f"{settings.diarize_http_url}/diarize_labeled",
                 files={"file": (f"{meeting_id}.wav", wav_full, "audio/wav")},
-                data=data,
+                data={**data, "name_threshold": str(settings.reannotate_name_threshold)},
             )
             r.raise_for_status()
             diar = r.json()
@@ -159,16 +159,26 @@ async def _apply_to_utterances(meeting_id: str, segs: list[list]) -> int:
         # 时间戳有效的句子走精确匹配
         stamped = [r for r in rows if r.end_ms > 0]
         unstamped = [r for r in rows if r.end_ms <= 0]
+        # 回写保护：实时已匹配到的注册名（非匿名）不被重标注的匿名标签覆盖。
+        # 背景：重标注逐段阈值天生动摇（0.4 全误吸 / 0.5 偏严拒真），
+        # 实时端因有会话内质心累积，短句匹配常比重标注更准，答对的要保留。
+        def is_anon(name: str) -> bool:
+            return not name or name.startswith("说话人")
+
         updated = 0
         for row in stamped:
             name = match(row.start_ms, row.end_ms)
-            if name and name != row.speaker:
-                await db.execute(
-                    Utterance.__table__.update()
-                    .where(Utterance.id == row.id)
-                    .values(speaker=name)
-                )
-                updated += 1
+            if not name or name == row.speaker:
+                continue
+            # 重标注给出匿名时：句子上已是注册名则保留（只升级不降级）
+            if is_anon(name) and not is_anon(row.speaker or ""):
+                continue
+            await db.execute(
+                Utterance.__table__.update()
+                .where(Utterance.id == row.id)
+                .values(speaker=name)
+            )
+            updated += 1
 
         # 无时间戳（老会议）：白名单收敛（保底，不再出第三说话人）
         if unstamped:
