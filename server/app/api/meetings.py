@@ -78,14 +78,21 @@ async def meeting_detail(meeting_id: str) -> dict:
 
 
 @router.post("/meetings/{meeting_id}/reannotate")
-async def meeting_reannotate(meeting_id: str, speaker_count: int = 0) -> dict:
-    """手动触发会末重标注（历史会议补跑 / 失败重试）。speaker_count>0 时作为 oracle。"""
+async def meeting_reannotate(
+    meeting_id: str, speaker_count: int = 0, name_threshold: float = 0
+) -> dict:
+    """手动触发会末重标注（历史会议补跑 / 失败重试）。
+
+    speaker_count>0 时作为 oracle；name_threshold 在 (0,1) 时作为声纹匹配阈值，
+    否则用 config 默认。
+    """
     from app.core.reannotate import reannotate_for_meeting
 
     async with SessionLocal() as db:
         if not await db.get(Meeting, meeting_id):
             raise HTTPException(404, "meeting not found")
-    started = await reannotate_for_meeting(meeting_id, speaker_count=speaker_count)
+    thr = name_threshold if 0 < name_threshold < 1 else None
+    started = await reannotate_for_meeting(meeting_id, speaker_count=speaker_count, name_threshold=thr)
     if not started:
         raise HTTPException(404, "recording not found")
     return {"ok": True, "meeting_id": meeting_id}

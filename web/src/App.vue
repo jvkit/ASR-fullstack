@@ -109,6 +109,8 @@ function handleMessage(msg: ServerMessage) {
 async function onStart(payload: {
   title: string
   spkThreshold: number
+  spkMatchThreshold: number
+  reannotateNameThreshold: number
   speakerCount: number
   maxSpeakers: number
   vadMaxEndSilenceMs: number
@@ -148,6 +150,8 @@ async function onStart(payload: {
   }
   ws.start(payload.title, {
     spkThreshold: payload.spkThreshold,
+    spkMatchThreshold: payload.spkMatchThreshold,
+    reannotateNameThreshold: payload.reannotateNameThreshold,
     speakerCount: payload.speakerCount || undefined,
     maxSpeakers: payload.maxSpeakers || undefined,
     vadMaxEndSilenceMs: payload.vadMaxEndSilenceMs,

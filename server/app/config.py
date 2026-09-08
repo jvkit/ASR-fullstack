@@ -66,6 +66,9 @@ class Settings(BaseSettings):
     # 说话人聚类上限（发给 gpu FunASR；0=不限制，>0 则匿名聚类最多 N 人，超出并入最相近簇）
     spk_max_speakers: int = 0
 
+    # 声纹匹配阈值（实时端注册声纹命中线，发给 gpu FunASR；gpu 启动参数 --speaker_match_threshold 的运行时覆盖）
+    spk_match_threshold: float = 0.40
+
 
 def load_hotwords() -> str:
     """读取热词文件 + 额外热词，合并为逗号分隔串（FunASR 协议格式）。

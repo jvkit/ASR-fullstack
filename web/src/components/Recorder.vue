@@ -6,6 +6,8 @@ const emit = defineEmits<{
   start: [payload: {
     title: string
     spkThreshold: number
+    spkMatchThreshold: number
+    reannotateNameThreshold: number
     speakerCount: number
     maxSpeakers: number
     vadMaxEndSilenceMs: number
@@ -20,6 +22,8 @@ const emit = defineEmits<{
 const form = reactive({
   title: '未命名会议',
   spkThreshold: 0.55,
+  spkMatchThreshold: 0.40,
+  reannotateNameThreshold: 0.50,
   speakerCount: 0,
   // 高级参数（默认与后端 config.py 一致）
   maxSpeakers: 0,
@@ -32,12 +36,19 @@ const showAdvanced = ref(false)
 // 录音开始后不允许改参数，面板自动收起
 watch(() => props.recording, (rec) => { if (rec) showAdvanced.value = false })
 
+function clampThr(v: number, dft: number): number {
+  const n = Number(v)
+  return Number.isFinite(n) && n > 0 && n < 1 ? n : dft
+}
+
 function start() {
   if (!form.title.trim()) return
   const thr = Number(form.spkThreshold)
   emit('start', {
     title: form.title.trim(),
     spkThreshold: Number.isFinite(thr) && thr > 0 && thr < 1 ? thr : 0.55,
+    spkMatchThreshold: clampThr(form.spkMatchThreshold, 0.40),
+    reannotateNameThreshold: clampThr(form.reannotateNameThreshold, 0.50),
     // 0 = 不指定（后端自动估计）；>0 = 明确告知参会人数
     speakerCount: Number.isFinite(form.speakerCount) && form.speakerCount > 0 ? Math.floor(form.speakerCount) : 0,
     maxSpeakers: Number.isFinite(form.maxSpeakers) && form.maxSpeakers > 0 ? Math.floor(form.maxSpeakers) : 0,
@@ -91,6 +102,34 @@ function togglePause() {
             @change="(v: number) => (form.spkThreshold = v)"
           />
           <span class="thr-tip">高=不易并人，低=更宽松</span>
+        </template>
+      </van-field>
+      <van-field label="声纹匹配阈值">
+        <template #input>
+          <van-stepper
+            :model-value="form.spkMatchThreshold"
+            :min="0.1"
+            :max="0.9"
+            :step="0.05"
+            :decimal-length="2"
+            :disabled="recording"
+            @change="(v: number) => (form.spkMatchThreshold = v)"
+          />
+          <span class="thr-tip">实时：与注册声纹比对的命中线（默认 0.40）</span>
+        </template>
+      </van-field>
+      <van-field label="重标注阈值">
+        <template #input>
+          <van-stepper
+            :model-value="form.reannotateNameThreshold"
+            :min="0.1"
+            :max="0.9"
+            :step="0.05"
+            :decimal-length="2"
+            :disabled="recording"
+            @change="(v: number) => (form.reannotateNameThreshold = v)"
+          />
+          <span class="thr-tip">会末重标注：逐段声纹命中线（默认 0.50）</span>
         </template>
       </van-field>
       <van-field label="人数上限">

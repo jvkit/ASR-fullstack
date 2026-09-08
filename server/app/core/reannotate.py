@@ -27,12 +27,18 @@ from app.db.models import Meeting, ReAnnotateUtterance
 logger = logging.getLogger(__name__)
 
 
-async def reannotate(meeting_id: str, pcm: bytes, speaker_count: int = 0) -> None:
+async def reannotate(
+    meeting_id: str,
+    pcm: bytes,
+    speaker_count: int = 0,
+    name_threshold: float | None = None,
+) -> None:
     """会末重标注主入口（session.stop 里 asyncio.create_task 调用）。失败仅记日志。
 
     speaker_count: 前端填写的参会人数（0=未填写）。>0 时直接作为 oracle；
     否则按 reannotate_oracle_mode 决定：auto=阿里自估（默认），
     auto_tune=gpu 按簇内紧度扫 2..6 选优，registered=声纹库人数+extra。
+    name_threshold: 声纹匹配阈值（None=用 config 默认 reannotate_name_threshold）。
     """
     try:
         if len(pcm) / 32000 < settings.reannotate_min_sec:
@@ -53,11 +59,12 @@ async def reannotate(meeting_id: str, pcm: bytes, speaker_count: int = 0) -> Non
                 if oracle:
                     data["oracle_num"] = str(oracle)
             # mode == "auto"：不传 oracle，让阿里自估（实测效果最稳）
+        thr = name_threshold if name_threshold and 0 < name_threshold < 1 else settings.reannotate_name_threshold
         async with httpx.AsyncClient(timeout=600) as cli:
             r = await cli.post(
                 f"{settings.diarize_http_url}/diarize_labeled",
                 files={"file": (f"{meeting_id}.wav", wav_full, "audio/wav")},
-                data={**data, "name_threshold": str(settings.reannotate_name_threshold)},
+                data={**data, "name_threshold": str(thr)},
             )
             r.raise_for_status()
             diar = r.json()
@@ -95,10 +102,15 @@ async def reannotate(meeting_id: str, pcm: bytes, speaker_count: int = 0) -> Non
         logger.exception("reannotate failed for %s", meeting_id)
 
 
-async def reannotate_for_meeting(meeting_id: str, speaker_count: int = 0) -> bool:
+async def reannotate_for_meeting(
+    meeting_id: str,
+    speaker_count: int = 0,
+    name_threshold: float | None = None,
+) -> bool:
     """按 meeting_id 从盘上读录音重跑重标注（手动触发 / 历史会议补跑）。
 
     speaker_count: 手动触发时前端传入的参会人数（0=按声纹库估计）。
+    name_threshold: 声纹匹配阈值（None=用 config 默认）。
     """
     wav = Path(settings.recordings_dir) / f"{meeting_id}.wav"
     if not wav.is_file():
@@ -108,7 +120,7 @@ async def reannotate_for_meeting(meeting_id: str, speaker_count: int = 0) -> boo
     with contextlib.suppress(Exception):
         with wave.open(io.BytesIO(raw), "rb") as w:
             pcm = w.readframes(w.getnframes())
-    await reannotate(meeting_id, pcm, speaker_count=speaker_count)
+    await reannotate(meeting_id, pcm, speaker_count=speaker_count, name_threshold=name_threshold)
     return True
 
 

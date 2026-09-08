@@ -29,11 +29,14 @@ export class MeetingWs {
 
   start(
     title: string,
-    opts?: { spkThreshold?: number; speakerCount?: number; maxSpeakers?: number;
+    opts?: { spkThreshold?: number; spkMatchThreshold?: number; reannotateNameThreshold?: number;
+             speakerCount?: number; maxSpeakers?: number;
              vadMaxEndSilenceMs?: number; vadMaxSegmentSec?: number; spkMinSegSec?: number },
   ): void {
     const payload: Record<string, unknown> = { type: 'start', title }
     if (opts?.spkThreshold !== undefined) payload.spk_threshold = opts.spkThreshold
+    if (opts?.spkMatchThreshold !== undefined) payload.spk_match_threshold = opts.spkMatchThreshold
+    if (opts?.reannotateNameThreshold !== undefined) payload.reannotate_name_threshold = opts.reannotateNameThreshold
     if (opts?.speakerCount !== undefined && opts.speakerCount > 0) payload.speaker_count = opts.speakerCount
     if (opts?.maxSpeakers !== undefined && opts.maxSpeakers > 0) payload.max_speakers = opts.maxSpeakers
     if (opts?.vadMaxEndSilenceMs !== undefined) payload.vad_max_end_silence_ms = opts.vadMaxEndSilenceMs

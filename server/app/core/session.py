@@ -52,6 +52,8 @@ class MeetingSession:
         self.final_title = ""
         self.final_attributes: list[dict] = []  # 累积的事实性属性（key 去重合并）
         self.spk_threshold: float = 0.55  # 说话人聚类阈值，前端可调
+        self.spk_match_threshold: float = settings.spk_match_threshold  # 注册声纹匹配阈值，前端可调
+        self.reannotate_name_threshold: float | None = None  # 会末重标注声纹阈值（None=用 config 默认），前端可调
         self.speaker_count: int = 0  # 参会人数（前端填写，0=自动估计），会末重标注 oracle
         # 高级调参（前端配置面板可覆盖；默认取 config.py）
         self.max_speakers: int = settings.spk_max_speakers          # 实时聚类人数上限（0=不限）
@@ -68,6 +70,7 @@ class MeetingSession:
             await db.commit()
         await self.asr.start({
             "spk_threshold": self.spk_threshold,
+            "speaker_match_threshold": self.spk_match_threshold,
             "vad_max_end_silence_ms": self.vad_max_end_silence_ms,
             "vad_max_segment_sec": self.vad_max_segment_sec,
             "spk_min_seg_sec": self.spk_min_seg_sec,
@@ -177,7 +180,11 @@ class MeetingSession:
         from app.core.reannotate import reannotate
 
         pcm = bytes(self._audio)
-        await reannotate(session_id, pcm, speaker_count=self.speaker_count)
+        await reannotate(
+            session_id, pcm,
+            speaker_count=self.speaker_count,
+            name_threshold=self.reannotate_name_threshold,
+        )
 
     async def handle_audio(self, pcm: bytes) -> None:
         if self._stopped or self.paused:

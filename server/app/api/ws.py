@@ -55,6 +55,20 @@ async def meeting_ws(ws: WebSocket) -> None:
                 session.spk_threshold = thr
         except (TypeError, ValueError):
             pass
+        # 注册声纹匹配阈值（前端可调，0.40=逐段声纹命中的 cosine 线；缺省走 config）
+        try:
+            mt = float(ctrl.get("spk_match_threshold") or 0)
+            if 0 < mt < 1:
+                session.spk_match_threshold = mt
+        except (TypeError, ValueError):
+            pass
+        # 会末重标注声纹阈值（前端可调；缺省走 config 的 reannotate_name_threshold）
+        try:
+            rt = float(ctrl.get("reannotate_name_threshold") or 0)
+            if 0 < rt < 1:
+                session.reannotate_name_threshold = rt
+        except (TypeError, ValueError):
+            pass
         # 参会人数（前端可填，0=自动估计）：会末重标注用它做 oracle，显著提升区分效果
         try:
             sc = int(ctrl.get("speaker_count") or 0)
