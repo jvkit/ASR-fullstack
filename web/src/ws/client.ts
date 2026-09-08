@@ -31,7 +31,8 @@ export class MeetingWs {
     title: string,
     opts?: { spkThreshold?: number; spkMatchThreshold?: number; reannotateNameThreshold?: number;
              speakerCount?: number; maxSpeakers?: number;
-             vadMaxEndSilenceMs?: number; vadMaxSegmentSec?: number; spkMinSegSec?: number },
+             vadMaxEndSilenceMs?: number; vadMaxSegmentSec?: number; spkMinSegSec?: number;
+             replayOf?: string },
   ): void {
     const payload: Record<string, unknown> = { type: 'start', title }
     if (opts?.spkThreshold !== undefined) payload.spk_threshold = opts.spkThreshold
@@ -42,6 +43,7 @@ export class MeetingWs {
     if (opts?.vadMaxEndSilenceMs !== undefined) payload.vad_max_end_silence_ms = opts.vadMaxEndSilenceMs
     if (opts?.vadMaxSegmentSec !== undefined) payload.vad_max_segment_sec = opts.vadMaxSegmentSec
     if (opts?.spkMinSegSec !== undefined) payload.spk_min_seg_sec = opts.spkMinSegSec
+    if (opts?.replayOf) payload.replay_of = opts.replayOf
     this.ws?.send(JSON.stringify(payload))
   }
 

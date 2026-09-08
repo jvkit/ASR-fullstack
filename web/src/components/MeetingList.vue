@@ -1,6 +1,5 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
-import { showToast } from 'vant'
 
 interface MeetingRow {
   id: string
@@ -15,7 +14,6 @@ const emit = defineEmits<{ open: [id: string] }>()
 
 const meetings = ref<MeetingRow[]>([])
 const loading = ref(true)
-const retesting = ref<string>('')  // 正在重测的会议 id
 
 function fmt(row: MeetingRow): string {
   if (!row.started_at) return '-'
@@ -30,18 +28,8 @@ function dur(row: MeetingRow): string {
 }
 
 async function retest(m: MeetingRow) {
-  if (retesting.value) return
-  retesting.value = m.id
-  showToast({ message: '已发起重测（说话人重新区分），约需半分钟', duration: 2500 })
-  try {
-    const resp = await fetch(`/api/meetings/${m.id}/reannotate?speaker_count=2`)
-    if (!resp.ok) throw new Error(await resp.text())
-    showToast({ message: '重测完成，点开会议查看结果', duration: 3000 })
-  } catch (e) {
-    showToast({ message: `重测失败：${e}`, type: 'fail', duration: 4000 })
-  } finally {
-    retesting.value = ''
-  }
+  // 重放测试入口在详情页（进入后点「用本场录音重新测试」）
+  emit('open', m.id)
 }
 
 onMounted(async () => {
@@ -74,9 +62,6 @@ onMounted(async () => {
               size="small"
               plain
               type="primary"
-              :loading="retesting === m.id"
-              :disabled="!!retesting || m.status === 'live'"
-              loading-text="重测中"
               @click.stop="retest(m)"
             >
               重新测试

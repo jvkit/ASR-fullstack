@@ -43,6 +43,13 @@ const summaries = ref<SummaryItem[]>([])
 const liveAttrs = ref<{ key: string; value: string }[]>([]) // 实时提取的事实性属性
 const errorMsg = ref('')
 
+// 重放测试（用历史录音模拟实时开会）：非空=正在重放某场历史会议
+const replaying = ref(false)
+const replaySourceId = ref('')
+const replayAudioUrl = ref('')
+const replayAudioEl = ref<HTMLAudioElement | null>(null)
+const replayFinished = ref(false)
+
 const mic = reactive(new MicRecorder())
 const ws = reactive(new MeetingWs())
 
@@ -97,6 +104,9 @@ function handleMessage(msg: ServerMessage) {
     case 'ended':
       recording.value = false
       paused.value = false
+      if (replaying.value) {
+        replayFinished.value = true
+      }
       meetingCount.value++
       break
     case 'error':
@@ -181,9 +191,79 @@ async function onStop() {
   paused.value = false
 }
 
+// 重放测试：用历史录音当音频源，走完整实时管线（不开麦克风）
+async function onReplayStart(sourceId: string, title: string) {
+  if (insecure.value) {
+    showToast({ message: '重放测试需在安全上下文下进行', type: 'fail', duration: 4000 })
+    return
+  }
+  errorMsg.value = ''
+  utterances.value = []
+  summaries.value = []
+  onlineText.value = ''
+  liveAttrs.value = []
+  speakerColorMap.clear()
+  replaying.value = true
+  replaySourceId.value = sourceId
+  replayFinished.value = false
+  replayAudioUrl.value = `/api/meetings/${sourceId}/audio`
+
+  await ws.connect()
+  ws.onMessage(handleMessage)
+  // 不开麦：直接 start，replay_of 让后端读历史录音喂 ASR
+  ws.start(`${title}（重放测试）`, {
+    speakerCount: 2, // 重放测试固定两人
+    spkThreshold: 0.55,
+    spkMatchThreshold: 0.40,
+    reannotateNameThreshold: 0.50,
+    maxSpeakers: 0,
+    vadMaxEndSilenceMs: 350,
+    vadMaxSegmentSec: 8,
+    spkMinSegSec: 1.0,
+    replayOf: sourceId,
+  })
+  recording.value = true
+}
+
+async function onReplayStop() {
+  ws.stop()
+  replaying.value = false
+  paused.value = false
+  replayAudioEl.value?.pause()
+}
+
+function onReplayPause() {
+  paused.value = true
+  replayAudioEl.value?.pause()
+  ws.pause()
+}
+
+function onReplayResume() {
+  paused.value = false
+  replayAudioEl.value?.play()
+  ws.resume()
+}
+
+function exitReplay() {
+  // 退出重放视图（ended 后点返回）：清状态回列表
+  if (replaying.value) {
+    ws.stop()
+  }
+  replaying.value = false
+  paused.value = false
+  replayFinished.value = false
+  replayAudioEl.value?.pause()
+  view.value = 'list'
+}
+
 function openDetail(id: string) {
   detailMeetingId.value = id
   view.value = 'detail'
+}
+
+async function onReplayRequested(id: string, title: string) {
+  view.value = 'live' // 切到 live 视图（replaying=true 时渲染重放视图）
+  await onReplayStart(id, title)
 }
 
 onMounted(() => {
@@ -209,8 +289,39 @@ onMounted(() => {
     />
 
     <main class="app-main">
+      <!-- 重放测试视图（历史录音模拟实时开会） -->
+      <template v-if="view === 'live' && replaying">
+        <div class="replay-bar">
+          <van-tag type="danger" size="large">重放测试</van-tag>
+          <span class="replay-title">{{ replaySourceId }}</span>
+          <van-button v-if="!replayFinished" size="small" type="warning" plain @click="paused ? onReplayResume() : onReplayPause()">
+            {{ paused ? '继续' : '暂停' }}
+          </van-button>
+          <van-button v-if="!replayFinished" size="small" type="danger" plain @click="onReplayStop">■ 停止</van-button>
+          <van-button v-else size="small" plain @click="exitReplay">退出重放</van-button>
+        </div>
+        <audio
+          v-if="replayAudioUrl"
+          ref="replayAudioEl"
+          :src="replayAudioUrl"
+          controls
+          autoplay
+          class="replay-audio"
+          @ended="() => {}"
+        />
+        <div v-if="liveAttrs.length" class="live-attrs">
+          <van-tag v-for="a in liveAttrs" :key="a.key" plain type="primary" class="attr-tag">
+            {{ a.key }}：{{ a.value }}
+          </van-tag>
+        </div>
+        <div class="live-panels">
+          <LiveTranscript :utterances="utterances" :online-text="onlineText" :speakers="knownSpeakers" :color-of="colorOf" />
+          <SummaryPanel :summaries="summaries" :meeting-id="meetingId" />
+        </div>
+      </template>
+
       <!-- 实时记录视图 -->
-      <template v-if="view === 'live'">
+      <template v-else-if="view === 'live'">
         <Recorder :recording="recording" :paused="paused" :insecure="insecure" @start="onStart" @pause="onPause" @resume="onResume" @stop="onStop" />
 
         <div v-if="liveAttrs.length" class="live-attrs">
@@ -247,6 +358,7 @@ onMounted(() => {
         v-else-if="view === 'detail'"
         :meeting-id="detailMeetingId"
         @back="view = 'list'"
+        @replay="onReplayRequested"
       />
     </main>
 
@@ -277,4 +389,10 @@ html, body, #app { height: 100%; margin: 0; }
   .live-panels > :first-child { flex: 7; }
   .live-panels > :last-child { flex: 5; }
 }
+
+/* 重放测试 */
+.replay-bar { display: flex; align-items: center; gap: 8px; padding: 4px 2px 8px; }
+.replay-title { flex: 1; font-size: 13px; color: #646566; word-break: break-all; }
+.replay-audio { width: 100%; margin-bottom: 8px; }
+
 </style>

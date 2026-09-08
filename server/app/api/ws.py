@@ -18,6 +18,8 @@
 import json
 import logging
 
+import asyncio
+
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from app.core.session import session_manager
@@ -44,9 +46,15 @@ async def meeting_ws(ws: WebSocket) -> None:
             await ws.close(code=4000)
             return
 
+        # 重放测试：音频来自历史录音（recordings/{replay_of}.wav），前端不开麦
+        replay_of = str(ctrl.get("replay_of") or "")
+        if replay_of:
+            replay_of = replay_of.strip() or None
+
         session = session_manager.create(
             title=str(ctrl.get("title") or "未命名会议"),
             recorder=str(ctrl.get("recorder") or ""),
+            replay_of=replay_of,
         )
         # 说话人聚类阈值（前端可调）：透传给 FunASR 服务端
         try:
@@ -105,9 +113,26 @@ async def meeting_ws(ws: WebSocket) -> None:
         await session.start()
         await ws.send_text(json.dumps({"type": "started", "meeting_id": session.meeting_id}))
 
+        # 重放模式：后台线程按真实节奏喂历史录音，前端只负责播放同一音频
+        replay_task = None
+        if session.replay_of:
+            from app.config import settings
+            from pathlib import Path
+            wav_path = Path(settings.recordings_dir) / f"{session.replay_of}.wav"
+            replay_task = asyncio.create_task(session.run_replay(str(wav_path)))
+
         # 2. 音频循环
         while True:
-            msg = await ws.receive()
+            if session.replay_of:
+                # 重放模式：receive 超时轮询，感知 replay_done（音频喂完自动结束）
+                try:
+                    msg = await asyncio.wait_for(ws.receive(), timeout=1.0)
+                except (TimeoutError, asyncio.TimeoutError):
+                    if session.replay_done.is_set():
+                        break
+                    continue
+            else:
+                msg = await ws.receive()
             if msg.get("bytes") is not None:
                 frame = msg["bytes"]
                 if len(frame) > MAX_BINARY_FRAME:
@@ -136,6 +161,8 @@ async def meeting_ws(ws: WebSocket) -> None:
         except Exception:
             pass
     finally:
+        if replay_task:
+            replay_task.cancel()
         if session:
             # 先收尾（最终转写/总结/ended 还要广播给这个客户端），再摘除连接
             await session.stop()

@@ -14,7 +14,7 @@ interface SummaryRow {
 }
 
 const props = defineProps<{ meetingId: string }>()
-const emit = defineEmits<{ back: [] }>()
+const emit = defineEmits<{ back: []; replay: [meetingId: string, title: string] }>()
 
 const title = ref('')
 const attrs = ref<Attr[]>([])
@@ -102,6 +102,12 @@ async function downloadMarkdown() {
         <audio v-if="audioUrl" controls :src="audioUrl" class="audio-el"></audio>
         <van-empty v-else description="本场会议无录音" image-size="64" />
       </div>
+      <div v-if="audioUrl" class="replay-row">
+        <van-button size="small" type="primary" plain block icon="play-circle-o" @click="emit('replay', props.meetingId, title)">
+          用本场录音重新测试（重放）
+        </van-button>
+        <div class="replay-tip">模拟实时开会：同步播放录音 + 实时转写/打标/纠错/总结</div>
+      </div>
     </van-cell-group>
 
     <van-cell-group inset class="block" title="说话人重标注（会末离线版）">
@@ -181,6 +187,8 @@ async function downloadMarkdown() {
 .block { margin-top: 12px; }
 .audio-wrap { padding: 8px 16px; }
 .audio-el { width: 100%; }
+.replay-row { padding: 0 16px 12px; }
+.replay-tip { font-size: 12px; color: #969799; margin-top: 6px; text-align: center; }
 .re-seg-head { padding: 4px 16px; display: flex; align-items: center; }
 .re-seg-tip { font-size: 13px; color: #646566; }
 .re-segs { padding: 4px 16px 12px; display: flex; flex-wrap: wrap; gap: 4px; }

@@ -27,10 +27,12 @@ logger = logging.getLogger(__name__)
 
 
 class MeetingSession:
-    def __init__(self, meeting_id: str, title: str, recorder: str) -> None:
+    def __init__(self, meeting_id: str, title: str, recorder: str, replay_of: str | None = None) -> None:
         self.meeting_id = meeting_id
         self.title = title
         self.recorder = recorder
+        self.replay_of = replay_of  # 非空=重放测试：音频来自历史录音而非麦克风
+        self.replay_done = asyncio.Event()  # 重放音频喂完置位（供 ws 循环感知自动结束）
         self.clients: set[WebSocket] = set()
         self.buffer = UtteranceBuffer()
         self.summary_seq = 0
@@ -92,7 +94,10 @@ class MeetingSession:
 
         await self.asr.finish()
         try:
-            await asyncio.wait_for(self._asr_closed.wait(), timeout=15)
+            # 重放测试的「停止」是主动放弃：不干等 ASR flush 缓冲（最多 15s），
+            # 已产出的转写保留，未转完的音频丢弃
+            timeout = 2 if self.replay_of else 15
+            await asyncio.wait_for(self._asr_closed.wait(), timeout=timeout)
         except (TimeoutError, asyncio.TimeoutError):
             logger.warning("meeting %s: asr close timeout", self.meeting_id)
 
@@ -125,6 +130,9 @@ class MeetingSession:
             result = await llm_client.extract_final_attributes(final_input)
 
             final_title = result["title"]
+            # 重放测试会议：标题保留「重放测试」标记（LLM 生成标题后仍追加，便于区分）
+            if self.replay_of and final_title and "重放测试" not in final_title:
+                final_title = f"{final_title}（重放测试）"
             final_summary = result["summary"] or rolling_summary
             final_tags = result["tags"][:settings.final_tags_count]
             # 属性：滚动提取的 + 会末提取的合并（key 去重，滚动版优先）
@@ -191,6 +199,44 @@ class MeetingSession:
             return
         self._audio.extend(pcm)
         await self.asr.send_audio(pcm)
+
+    # ---------- 重放测试（音频来自历史录音，按真实节奏走完整实时管线） ----------
+
+    async def run_replay(self, wav_path: str) -> None:
+        """把历史录音按 0.1s 节奏喂进实时管线，模拟真实开会。
+
+        暂停时挂起（不丢节拍，恢复后继续），stop 后立即退出。
+        喂完置位 replay_done，由 ws 循环触发正常结束流程。
+        """
+        import time
+        import wave
+
+        CHUNK_SEC = 0.1
+        try:
+            with wave.open(wav_path, "rb") as wf:
+                if wf.getnchannels() != 1 or wf.getsampwidth() != 2 or wf.getframerate() != 16000:
+                    await self.broadcast({"type": "error", "message": "录音格式异常（需 16kHz/int16/mono）"})
+                    self.replay_done.set()
+                    return
+                total = wf.getnframes()
+                logger.info("meeting %s replay start: %.1f min", self.meeting_id, total / 16000 / 60)
+                sent = 0
+                while sent < total and not self._stopped:
+                    if self.paused:
+                        await asyncio.sleep(0.2)
+                        continue
+                    chunk = wf.readframes(1600)  # 0.1s
+                    if not chunk:
+                        break
+                    await self.handle_audio(chunk)
+                    sent += len(chunk) // 2
+                    await asyncio.sleep(CHUNK_SEC)
+                logger.info("meeting %s replay fed: %.1f/%.1f min", self.meeting_id,
+                            sent / 16000 / 60, total / 16000 / 60)
+        except FileNotFoundError:
+            await self.broadcast({"type": "error", "message": f"录音文件不存在: {wav_path}"})
+        finally:
+            self.replay_done.set()
 
     # ---------- ASR 回调 ----------
 
@@ -282,9 +328,9 @@ class SessionManager:
     def __init__(self) -> None:
         self._sessions: dict[str, MeetingSession] = {}
 
-    def create(self, title: str, recorder: str) -> MeetingSession:
+    def create(self, title: str, recorder: str, replay_of: str | None = None) -> MeetingSession:
         meeting_id = uuid.uuid4().hex[:12]
-        session = MeetingSession(meeting_id, title, recorder)
+        session = MeetingSession(meeting_id, title, recorder, replay_of=replay_of)
         self._sessions[meeting_id] = session
         return session
 
