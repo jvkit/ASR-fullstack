@@ -26,7 +26,13 @@ async def run(wav_path: str, url: str) -> None:
         pcm = w.readframes(w.getnframes())
 
     # FunASR server 要求子协议 binary（serve 端 subprotocols=["binary"]），不传握手会被拒
-    async with websockets.connect(url, max_queue=64, subprotocols=["binary"]) as ws:
+    import ssl as _ssl
+    ssl_ctx = None
+    if url.startswith("wss://"):
+        ssl_ctx = _ssl.SSLContext(_ssl.PROTOCOL_TLS_CLIENT)
+        ssl_ctx.check_hostname = False
+        ssl_ctx.verify_mode = _ssl.CERT_NONE
+    async with websockets.connect(url, max_queue=64, subprotocols=["binary"], ssl=ssl_ctx) as ws:
         await ws.send(json.dumps({
             "mode": "2pass",
             "chunk_size": [5, 10, 5],
