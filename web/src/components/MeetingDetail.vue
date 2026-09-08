@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { onBeforeUnmount, onMounted, ref } from 'vue'
 import { showToast } from 'vant'
 
 interface Attr { key: string; value: string }
@@ -37,6 +37,29 @@ function colorOf(speaker: string): string {
   return speakerColorMap.get(speaker)!
 }
 
+// 录音控件吸顶：滚出视口后 fixed 到导航栏下（同一 audio 元素，播放不中断）
+const audioSlotRef = ref<HTMLElement | null>(null)
+const audioPinned = ref(false)
+let audioObserver: IntersectionObserver | null = null
+
+function setupAudioPin() {
+  teardownAudioPin()
+  if (!audioSlotRef.value) return
+  audioObserver = new IntersectionObserver(
+    (entries) => {
+      // slot 完全滚出视口上方（在顶部之上）-> 吸顶
+      audioPinned.value = entries[0]?.boundingClientRect.bottom! < 46
+    },
+    { threshold: [0] },
+  )
+  audioObserver.observe(audioSlotRef.value)
+}
+
+function teardownAudioPin() {
+  audioObserver?.disconnect()
+  audioObserver = null
+}
+
 async function load() {
   loading.value = true
   try {
@@ -52,6 +75,8 @@ async function load() {
     utterances.value = detail.utterances || []
     reSegs.value = detail.utterances_re || []
     summaries.value = (sumResp as SummaryRow[]) || []
+    // 等 DOM 渲染出 audio slot 后再挂观察器
+    setTimeout(setupAudioPin, 0)
   } finally {
     loading.value = false
   }
@@ -72,6 +97,7 @@ function fmtSec(ms: number): string {
 }
 
 onMounted(load)
+onBeforeUnmount(teardownAudioPin)
 
 async function downloadMarkdown() {
   const resp = await fetch(`/api/meetings/${props.meetingId}/report`)
@@ -101,10 +127,16 @@ async function downloadMarkdown() {
     </van-cell-group>
 
     <van-cell-group inset class="block" title="录音回放">
-      <div class="audio-sticky">
-        <audio v-if="audioUrl" controls :src="audioUrl" class="audio-el"></audio>
-        <van-empty v-else description="本场会议无录音" image-size="64" />
+      <!-- 录音控件：原位播放；滚出屏幕后吸顶固定（同一 audio 元素，播放不中断） -->
+      <div v-if="audioUrl" ref="audioSlotRef" class="audio-slot">
+        <audio
+          ref="audioElRef"
+          controls
+          :src="audioUrl"
+          :class="{ 'audio-el': true, 'audio-el--fixed': audioPinned }"
+        ></audio>
       </div>
+      <van-empty v-else description="本场会议无录音" image-size="64" />
       <div v-if="audioUrl" class="replay-row">
         <van-button size="small" type="primary" plain block icon="play-circle-o" @click="emit('replay', props.meetingId, title)">
           用本场录音重新测试（重放）
@@ -191,14 +223,18 @@ async function downloadMarkdown() {
 .detail-head { display: flex; align-items: center; gap: 8px; padding: 4px 8px 8px; }
 .detail-title { flex: 1; font-weight: 600; font-size: 15px; word-break: break-word; }
 .block { margin-top: 12px; }
-.audio-sticky {
-  position: sticky;
-  top: 0;
-  z-index: 10;
-  background: #fff;
-  padding: 8px 16px;
-}
+.audio-slot { min-height: 40px; }
 .audio-el { width: 100%; }
+.audio-el--fixed {
+  position: fixed;
+  top: 46px; /* van-nav-bar 高度 */
+  left: 16px;
+  right: 16px;
+  z-index: 100;
+  background: #fff;
+  padding: 8px 0;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+}
 .replay-row { padding: 0 16px 12px; }
 .replay-tip { font-size: 12px; color: #969799; margin-top: 6px; text-align: center; }
 .re-seg-head { padding: 4px 16px; display: flex; align-items: center; }
