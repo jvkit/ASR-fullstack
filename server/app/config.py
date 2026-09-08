@@ -16,14 +16,10 @@ class Settings(BaseSettings):
     funasr_ws_url: str = "wss://192.168.30.87:10095"
     funasr_hotwords: str = ""
 
-    # 会末重标注（gpu diarize 服务）
-    diarize_http_url: str = "http://192.168.30.87:10096"  # 阿里 pipeline 切分 + ERes2NetV2 声纹
-    reannotate_oracle_extra: int = 1      # 人数估计 = 注册声纹数 + 此值（宁多勿少，按名合并自愈）
-    reannotate_oracle_mode: str = "auto"  # 未填人数时的 oracle 策略：auto=让阿里自估 | registered=注册数+extra | auto_tune=按簇内紧度扫 2..6
-    reannotate_max_oracle: int = 8        # 重标注人数上限
+    # 会末重标注（gpu diarize 服务，v3 句子级声纹：/diarize_sent）
+    diarize_http_url: str = "http://192.168.30.87:10096"  # ERes2NetV2 逐句声纹命名
     reannotate_min_sec: int = 10          # 短于此秒数不做重标注
     reannotate_name_threshold: float = 0.50  # 重标注声纹匹配阈值。实测 0.40 会把 0.34~0.38 的无关段误吸成注册名（全 admin）；0.50 偏严但配合回写保护（匿名不覆盖注册名）可用
-    diarize_max_oracle: int = 8           # 阿里 pipeline 自动模式人数候选上限（自动估计时在 2..N 里挑）
 
     # LLM（内网 vLLM / mymodule 网关）
     llm_base_url: str = "http://127.0.0.1:4000/v1"
