@@ -211,15 +211,17 @@ async function onReplayStart(sourceId: string, title: string) {
   await ws.connect()
   ws.onMessage(handleMessage)
   // 不开麦：直接 start，replay_of 让后端读历史录音喂 ASR
+  // 参数唯一来源 /api/config（与 config.py 一致）；speakerCount=2 为重放测试固定
+  const cfg = await fetch('/api/config').then((r) => r.json()).catch(() => ({}))
   ws.start(`${title}（重放测试）`, {
     speakerCount: 2, // 重放测试固定两人
-    spkThreshold: 0.55,
-    spkMatchThreshold: 0.40,
-    reannotateNameThreshold: 0.50,
-    maxSpeakers: 0,
-    vadMaxEndSilenceMs: 350,
-    vadMaxSegmentSec: 8,
-    spkMinSegSec: 1.0,
+    spkThreshold: Number(cfg?.spk_threshold ?? 0.55),
+    spkMatchThreshold: Number(cfg?.spk_match_threshold ?? 0.40),
+    reannotateNameThreshold: Number(cfg?.reannotate_name_threshold ?? 0.30),
+    maxSpeakers: Number(cfg?.max_speakers ?? 0),
+    vadMaxEndSilenceMs: Number(cfg?.vad_max_end_silence_ms ?? 350),
+    vadMaxSegmentSec: Number(cfg?.vad_max_segment_sec ?? 8),
+    spkMinSegSec: Number(cfg?.spk_min_seg_sec ?? 1.0),
     replayOf: sourceId,
   })
   recording.value = true

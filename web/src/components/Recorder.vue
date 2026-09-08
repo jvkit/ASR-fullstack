@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { reactive, ref, watch } from 'vue'
+import { onMounted, reactive, ref, watch } from 'vue'
 
 const props = defineProps<{ recording: boolean; paused: boolean; insecure: boolean }>()
 const emit = defineEmits<{
@@ -19,17 +19,35 @@ const emit = defineEmits<{
   stop: []
 }>()
 
+// 默认值唯一来源：后端 /api/config（与 config.py 一致）。启动时拉取，失败用下方兜底值。
 const form = reactive({
   title: '未命名会议',
   spkThreshold: 0.55,
   spkMatchThreshold: 0.40,
-  reannotateNameThreshold: 0.50,
+  reannotateNameThreshold: 0.30,
   speakerCount: 0,
-  // 高级参数（默认与后端 config.py 一致）
   maxSpeakers: 0,
   vadMaxEndSilenceMs: 350,
   vadMaxSegmentSec: 8,
   spkMinSegSec: 1.0,
+})
+
+// 默认值唯一来源：后端 /api/config（与 config.py 一致）。启动时拉取，失败用兜底值。
+onMounted(async () => {
+  try {
+    const cfg = await fetch('/api/config').then((r) => r.json())
+    if (cfg) {
+      if (cfg.spk_threshold != null) form.spkThreshold = Number(cfg.spk_threshold)
+      if (cfg.spk_match_threshold != null) form.spkMatchThreshold = Number(cfg.spk_match_threshold)
+      if (cfg.reannotate_name_threshold != null) form.reannotateNameThreshold = Number(cfg.reannotate_name_threshold)
+      if (cfg.max_speakers != null) form.maxSpeakers = Number(cfg.max_speakers)
+      if (cfg.vad_max_end_silence_ms != null) form.vadMaxEndSilenceMs = Number(cfg.vad_max_end_silence_ms)
+      if (cfg.vad_max_segment_sec != null) form.vadMaxSegmentSec = Number(cfg.vad_max_segment_sec)
+      if (cfg.spk_min_seg_sec != null) form.spkMinSegSec = Number(cfg.spk_min_seg_sec)
+    }
+  } catch {
+    // 拉取失败：保留兜底默认值
+  }
 })
 
 const showAdvanced = ref(false)
@@ -48,7 +66,7 @@ function start() {
     title: form.title.trim(),
     spkThreshold: Number.isFinite(thr) && thr > 0 && thr < 1 ? thr : 0.55,
     spkMatchThreshold: clampThr(form.spkMatchThreshold, 0.40),
-    reannotateNameThreshold: clampThr(form.reannotateNameThreshold, 0.50),
+    reannotateNameThreshold: clampThr(form.reannotateNameThreshold, 0.30),
     // 0 = 不指定（后端自动估计）；>0 = 明确告知参会人数
     speakerCount: Number.isFinite(form.speakerCount) && form.speakerCount > 0 ? Math.floor(form.speakerCount) : 0,
     maxSpeakers: Number.isFinite(form.maxSpeakers) && form.maxSpeakers > 0 ? Math.floor(form.maxSpeakers) : 0,
@@ -129,7 +147,7 @@ function togglePause() {
             :disabled="recording"
             @change="(v: number) => (form.reannotateNameThreshold = v)"
           />
-          <span class="thr-tip">会末重标注：逐段声纹命中线（默认 0.50）</span>
+          <span class="thr-tip">会末重标注：逐段声纹命中线（默认 0.30）</span>
         </template>
       </van-field>
       <van-field label="人数上限">

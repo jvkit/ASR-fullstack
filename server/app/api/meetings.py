@@ -14,6 +14,21 @@ from app.db.models import Meeting, ReAnnotateUtterance, Summary, Utterance
 router = APIRouter(prefix="/api", tags=["meetings"])
 
 
+@router.get("/config")
+async def get_config() -> dict:
+    """可调参数只此一处：前端默认值、session 默认值、手动重标注全部从这里读。"""
+    return {
+        "spk_threshold": settings.spk_threshold,                # 说话人聚类阈值（实时）
+        "spk_match_threshold": settings.spk_match_threshold,    # 注册声纹匹配阈值（实时）
+        "reannotate_name_threshold": settings.reannotate_name_threshold,  # 会末重标注声纹阈值
+        "speaker_count": 0,                                     # 参会人数（0=自动，前端每会可填）
+        "max_speakers": settings.spk_max_speakers,              # 实时聚类人数上限（0=不限）
+        "vad_max_end_silence_ms": settings.vad_max_end_silence_ms,
+        "vad_max_segment_sec": settings.vad_max_segment_sec,
+        "spk_min_seg_sec": settings.spk_min_seg_sec,
+    }
+
+
 @router.get("/meetings")
 async def list_meetings(limit: int = 50) -> list[dict]:
     async with SessionLocal() as db:

@@ -65,6 +65,9 @@ class Settings(BaseSettings):
     # 声纹匹配阈值（实时端注册声纹命中线，发给 gpu FunASR；gpu 启动参数 --speaker_match_threshold 的运行时覆盖）
     spk_match_threshold: float = 0.40
 
+    # 说话人聚类阈值（实时端，发给 gpu FunASR；高=不易并人，低=更宽松）
+    spk_threshold: float = 0.55
+
 
 def load_hotwords() -> str:
     """读取热词文件 + 额外热词，合并为逗号分隔串（FunASR 协议格式）。

@@ -60,7 +60,7 @@ class MeetingSession:
         self.paused = False  # 前端暂停：丢弃上行音频（连接保持）
         self.final_title = ""
         self.final_attributes: list[dict] = []  # 累积的事实性属性（key 去重合并）
-        self.spk_threshold: float = 0.55  # 说话人聚类阈值，前端可调
+        self.spk_threshold: float = settings.spk_threshold  # 说话人聚类阈值，前端可调（默认值唯一来源 config）
         self.spk_match_threshold: float = settings.spk_match_threshold  # 注册声纹匹配阈值，前端可调
         self.reannotate_name_threshold: float | None = None  # 会末重标注声纹阈值（None=用 config 默认），前端可调
         self.speaker_count: int = 0  # 参会人数（前端填写，0=自动估计），会末重标注 oracle
