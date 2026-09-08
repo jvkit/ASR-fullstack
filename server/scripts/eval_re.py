@@ -33,6 +33,11 @@ GROUND_TRUTH: dict[str, list] = {
         {"text_contains": "就这样的一个问题", "speaker": "admin"},   # 16s-17s，会后版判蒋泽鹏
         {"text_contains": "那就不用做算了", "speaker": "蒋泽鹏"},     # 45s-50s 主体；「说了一下是吧」是 admin（句内切分，标主体）
         {"text_contains": "物理输入参会人数", "speaker": "蒋泽鹏"},   # 35s-40s 主体；「哎，对，我现在就是输入呀」是 admin
+        # 138-149s 一串：真实多为 admin，「我的名字」(146s) 是杂音 -> 整串判蒋泽鹏全错
+        {"text_contains": "这具体的识别不准", "speaker": "admin"},
+        {"text_contains": "这个是这个是模型的问题", "speaker": "admin"},
+        {"text_contains": "对呀，因为这个", "speaker": "admin"},
+        {"text_contains": "我的名字", "speaker": "admin"},  # 实为杂音；GT 标 admin 验证「不该判蒋泽鹏」
     ],
 }
 
