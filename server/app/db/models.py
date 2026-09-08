@@ -39,6 +39,8 @@ class Utterance(Base):
     text: Mapped[str] = mapped_column(Text)
     start_ms: Mapped[int] = mapped_column(Integer, default=0)
     end_ms: Mapped[int] = mapped_column(Integer, default=0)
+    # FunASR offline 字级时间戳 JSON：[[char, start_ms, end_ms], ...]（会后版按字分配文字用）
+    char_timestamps: Mapped[str] = mapped_column(Text, default="[]")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
 
 
@@ -67,6 +69,7 @@ class ReAnnotateUtterance(Base):
     meeting_id: Mapped[str] = mapped_column(String(36), index=True)
     seq: Mapped[int] = mapped_column(Integer)  # 会议内序号
     speaker: Mapped[str] = mapped_column(String(32), default="")  # 注册名 / 说话人N
+    text: Mapped[str] = mapped_column(Text, default="")  # 按字级时间戳分配到本段的文字
     start_ms: Mapped[int] = mapped_column(Integer, default=0)
     end_ms: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)

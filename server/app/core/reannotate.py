@@ -13,18 +13,26 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import io
+import json
 import logging
 import wave
 from pathlib import Path
 
 import httpx
-from sqlalchemy import delete
+from sqlalchemy import delete, select
 
 from app.config import settings
 from app.db.database import SessionLocal
-from app.db.models import Meeting, ReAnnotateUtterance
+from app.db.models import Meeting, ReAnnotateUtterance, Utterance
 
 logger = logging.getLogger(__name__)
+
+
+def _is_punct(ch: str) -> bool:
+    """中英文标点（FunASR timestamp 不含标点，对齐时跳过）。"""
+    import unicodedata
+
+    return unicodedata.category(ch).startswith("P") or ch.isspace()
 
 
 async def reannotate(
@@ -79,6 +87,9 @@ async def reannotate(
             await db.execute(
                 delete(ReAnnotateUtterance).where(ReAnnotateUtterance.meeting_id == meeting_id)
             )
+            # 字级时间戳：实时版句子的字级区间 → 按重标注段时间重叠分配到段上
+            char_chars = await _load_char_chars(db, meeting_id)
+            seg_texts = _assign_chars_to_segs(segs, char_chars)
             for i, seg in enumerate(segs):
                 s0, s1 = seg[0], seg[1]
                 name = seg[3] if len(seg) > 3 else ""
@@ -86,6 +97,7 @@ async def reannotate(
                     meeting_id=meeting_id,
                     seq=i,
                     speaker=name,
+                    text=seg_texts[i],
                     start_ms=int(s0 * 1000),
                     end_ms=int(s1 * 1000),
                 ))
@@ -94,9 +106,6 @@ async def reannotate(
                 meeting.reannotated = True
             await db.commit()
 
-        # 回写：把重标注的说话人映射回实时版 utterances（按时间重叠匹配段），
-        # 逐句转写（实时版）因此与重标注区块一致，不再有第三个匿名说话人。
-        await _apply_to_utterances(meeting_id, segs)
         logger.info("reannotate %s done", meeting_id)
     except Exception:
         logger.exception("reannotate failed for %s", meeting_id)
@@ -134,93 +143,51 @@ def _pcm_to_wav(pcm: bytes) -> bytes:
     return buf.getvalue()
 
 
-async def _apply_to_utterances(meeting_id: str, segs: list[list]) -> int:
-    """把重标注说话人回写实时版 utterances（逐句转写不再有第三个说话人）。
+async def _load_char_chars(db, meeting_id: str) -> list[tuple[str, int, int]]:
+    """读实时版句子的字级时间戳 → [(char, start_ms, end_ms), ...]（按 seq 升序）。
 
-    句子时间戳已是会议绝对毫秒（gpu 端段偏移 patch），因此用时间重叠逐句
-    匹配重标注段；无重叠（时间戳缺失的老会议）时退回白名单收敛策略。
+    老会议（无字级时间戳）返回空列表：会后版文字为空，段照常落库。
+    时间戳不含标点，标点继承前一字区间（与 session 端一致）。
     """
-    from app.db.models import Utterance
+    rows = (await db.execute(
+        select(Utterance).where(Utterance.meeting_id == meeting_id).order_by(Utterance.seq)
+    )).scalars().all()
+    chars: list[tuple[str, int, int]] = []
+    for u in rows:
+        try:
+            ts = json.loads(u.char_timestamps or "[]")
+        except json.JSONDecodeError:
+            ts = []
+        if not ts:
+            continue
+        prev = [int(ts[0][0]), int(ts[0][1])]
+        idx = 0
+        for ch in u.text:
+            if idx < len(ts) and not _is_punct(ch):
+                prev = [int(ts[idx][0]), int(ts[idx][1])]
+                idx += 1
+            chars.append((ch, prev[0], prev[1]))
+    return chars
 
-    spans = [
-        (int(s[0] * 1000), int(s[1] * 1000), (s[3] if len(s) > 3 else ""))
-        for s in segs
-    ]
-    if not spans:
-        return 0
 
-    def match(u_start: int, u_end: int) -> str | None:
-        """与句子时间重叠最大的重标注段名；重叠须过半句时长。"""
-        best, best_ov = None, 0
-        for s0, s1, name in spans:
-            ov = min(u_end, s1) - max(u_start, s0)
-            if ov > best_ov:
-                best, best_ov = name, ov
-        if best_ov <= 0 or not best:
-            return None
-        if (u_end - u_start) > 0 and best_ov / (u_end - u_start) < 0.5:
-            return None
-        return best
+def _assign_chars_to_segs(segs: list[list], chars: list[tuple[str, int, int]]) -> list[str]:
+    """按字级时间戳把实时转写的每个字分配到重叠最大的重标注段。
 
-    async with SessionLocal() as db:
-        result = await db.execute(
-            Utterance.__table__.select().where(Utterance.meeting_id == meeting_id)
-        )
-        rows = result.fetchall()
-
-        # 时间戳有效的句子走精确匹配
-        stamped = [r for r in rows if r.end_ms > 0]
-        unstamped = [r for r in rows if r.end_ms <= 0]
-        # 回写保护：实时已匹配到的注册名（非匿名）不被重标注的匿名标签覆盖。
-        # 背景：重标注逐段阈值天生动摇（0.4 全误吸 / 0.5 偏严拒真），
-        # 实时端因有会话内质心累积，短句匹配常比重标注更准，答对的要保留。
-        def is_anon(name: str) -> bool:
-            return not name or name.startswith("说话人")
-
-        updated = 0
-        for row in stamped:
-            name = match(row.start_ms, row.end_ms)
-            if not name or name == row.speaker:
-                continue
-            # 重标注给出匿名时：句子上已是注册名则保留（只升级不降级）
-            if is_anon(name) and not is_anon(row.speaker or ""):
-                continue
-            await db.execute(
-                Utterance.__table__.update()
-                .where(Utterance.id == row.id)
-                .values(speaker=name)
-            )
-            updated += 1
-
-        # 无时间戳（老会议）：白名单收敛（保底，不再出第三说话人）
-        if unstamped:
-            from collections import Counter
-            dur: Counter = Counter()
-            for s0, s1, name in spans:
-                if name:
-                    dur[name] += s1 - s0
-            whitelist = set(dur.keys())
-            if len(whitelist) == 1:
-                primary = whitelist.pop()
-            elif len(whitelist) >= 2:
-                primary = dur.most_common(1)[0][0]
-            else:
-                primary = None
-            if primary:
-                for row in unstamped:
-                    spk = row.speaker or ""
-                    if spk and spk in whitelist:
-                        continue
-                    if spk != primary:
-                        await db.execute(
-                            Utterance.__table__.update()
-                            .where(Utterance.id == row.id)
-                            .values(speaker=primary)
-                        )
-                        updated += 1
-        await db.commit()
-        logger.info("reannotate %s: applied to %d/%d utterances", meeting_id, updated, len(rows))
-        return updated
+    chars 时间与 segs 时间同为会议绝对毫秒（gpu 端段偏移 patch 已对齐），
+    每字取重叠最大的段；无重叠的字丢弃（对应段内无转写，正常现象）。
+    返回与 segs 等长的段文本列表。
+    """
+    if not chars:
+        return [""] * len(segs)
+    spans = [(float(s[0]) * 1000, float(s[1]) * 1000) for s in segs]
+    out: list[list[str]] = [[] for _ in segs]
+    for ch, c0, c1 in chars:
+        mid = (c0 + c1) / 2  # 字中点定位：边界字不劈两半，归中点所在段
+        for i, (s0, s1) in enumerate(spans):
+            if s0 <= mid < s1:
+                out[i].append(ch)
+                break
+    return ["".join(cs) for cs in out]
 
 
 async def _next_oracle() -> int | None:

@@ -7,6 +7,7 @@
 4. 服务端持续返回 JSON：
    - {"mode": "2pass-online",  "text": ...}                 流式临时结果
    - {"mode": "2pass-offline", "text": ..., "timestamp": ..., "spk": ...}  句终确定结果
+     （timestamp 为字级时间戳 [[char, start, end], ...]，start/end 单位 ms）
 """
 
 from __future__ import annotations
@@ -20,7 +21,7 @@ import websockets
 logger = logging.getLogger(__name__)
 
 OnlineCallback = Callable[[str], Awaitable[None]]
-OfflineCallback = Callable[[str, list, str | None], Awaitable[None]]
+OfflineCallback = Callable[[str, list, str | None, list], Awaitable[None]]
 ErrorCallback = Callable[[str], Awaitable[None]]
 ClosedCallback = Callable[[], Awaitable[None]]
 
@@ -146,10 +147,10 @@ class FunasrClient:
                     if self._on_online and text:
                         await self._on_online(text)
                 elif mode == "2pass-offline":
-                    ts = msg.get("timestamp") or []
+                    ts = msg.get("timestamp") or []  # 字级时间戳 [[start_ms, end_ms], ...]
                     spk = msg.get("spk_name") or msg.get("spk")
                     if self._on_offline and text:
-                        await self._on_offline(text, ts, spk)
+                        await self._on_offline(text, ts, spk, ts)
         except websockets.ConnectionClosed:
             pass
         except Exception:

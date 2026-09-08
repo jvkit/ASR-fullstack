@@ -4,7 +4,7 @@ import { showToast } from 'vant'
 
 interface Attr { key: string; value: string }
 interface Utterance { seq: number; speaker: string; text: string }
-interface ReSeg { seq: number; speaker: string; start_ms: number; end_ms: number }
+interface ReSeg { seq: number; speaker: string; text: string; start_ms: number; end_ms: number }
 interface SummaryRow {
   seq: number
   title: string
@@ -17,6 +17,7 @@ const props = defineProps<{ meetingId: string }>()
 const emit = defineEmits<{ back: []; replay: [meetingId: string, title: string] }>()
 
 const title = ref('')
+const meetingId = ref('')
 const attrs = ref<Attr[]>([])
 const startedAt = ref('')
 const audioUrl = ref('')
@@ -44,6 +45,7 @@ async function load() {
       fetch(`/api/meetings/${props.meetingId}/summaries`).then((r) => r.json()),
     ])
     title.value = detail.title
+    meetingId.value = detail.id || props.meetingId
     attrs.value = detail.attributes || []
     startedAt.value = detail.started_at || ''
     audioUrl.value = detail.audio_url || ''
@@ -92,6 +94,7 @@ async function downloadMarkdown() {
     </div>
 
     <van-cell-group inset class="block" title="会议信息">
+      <van-cell title="会议 ID" :value="meetingId" />
       <van-cell title="开始时间" :value="startedAt ? new Date(startedAt).toLocaleString('zh-CN') : '-'" />
       <van-cell title="状态" value="已结束" />
       <van-cell v-for="a in attrs" :key="a.key" :title="a.key" :value="a.value" />
@@ -110,7 +113,7 @@ async function downloadMarkdown() {
       </div>
     </van-cell-group>
 
-    <van-cell-group inset class="block" title="说话人重标注（会末离线版）">
+    <van-cell-group inset class="block" title="会后版（阿里 pipeline + 声纹）">
       <div v-if="reSegs.length" class="re-seg-head">
         <span class="re-seg-tip">人数：</span>
         <van-stepper
@@ -125,16 +128,19 @@ async function downloadMarkdown() {
           重新标注
         </van-button>
       </div>
-      <div v-if="reSegs.length" class="re-segs">
-        <van-tag
-          v-for="s in reSegs"
-          :key="s.seq"
-          plain
-          :type="s.speaker ? 'success' : 'default'"
-          class="re-tag"
-        >
-          [{{ fmtSec(s.start_ms) }}] {{ s.speaker || '未识别' }}
-        </van-tag>
+      <div v-if="reSegs.length" class="re-list">
+        <div v-for="s in reSegs" :key="s.seq" class="re-item">
+          <van-tag
+            plain
+            class="spk-tag"
+            :style="{ borderColor: colorOf(s.speaker), color: colorOf(s.speaker) }"
+          >
+            {{ s.speaker || '未识别' }}
+          </van-tag>
+          <span class="utt-text">
+            <span class="re-time">{{ fmtSec(s.start_ms) }}-{{ fmtSec(s.end_ms) }} </span>{{ s.text || '（无转写）' }}
+          </span>
+        </div>
       </div>
       <van-empty v-else description="尚未生成重标注（结束数分钟后自动完成，或手动触发）" image-size="64" />
     </van-cell-group>
@@ -191,8 +197,9 @@ async function downloadMarkdown() {
 .replay-tip { font-size: 12px; color: #969799; margin-top: 6px; text-align: center; }
 .re-seg-head { padding: 4px 16px; display: flex; align-items: center; }
 .re-seg-tip { font-size: 13px; color: #646566; }
-.re-segs { padding: 4px 16px 12px; display: flex; flex-wrap: wrap; gap: 4px; }
-.re-tag { margin: 0; }
+.re-list { padding: 8px 16px; }
+.re-item { margin-bottom: 10px; display: flex; align-items: baseline; gap: 8px; }
+.re-time { color: #969799; font-size: 12px; }
 .utts { padding: 8px 16px; }
 .utt { margin-bottom: 10px; display: flex; align-items: baseline; gap: 8px; }
 .utt-text { flex: 1; word-break: break-word; }

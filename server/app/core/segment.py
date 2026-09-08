@@ -13,6 +13,7 @@ class UtteranceItem:
     text: str
     start_ms: int
     end_ms: int
+    char_ts: list | None = None  # 字级时间戳 [[start_ms, end_ms], ...]（会后版按字分配用）
 
 
 @dataclass
@@ -27,9 +28,11 @@ class UtteranceBuffer:
     _next_seq: int = 1
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
-    async def add(self, speaker: str, text: str, start_ms: int, end_ms: int) -> UtteranceItem:
+    async def add(
+        self, speaker: str, text: str, start_ms: int, end_ms: int, char_ts: list | None = None
+    ) -> UtteranceItem:
         async with self._lock:
-            item = UtteranceItem(self._next_seq, speaker, text, start_ms, end_ms)
+            item = UtteranceItem(self._next_seq, speaker, text, start_ms, end_ms, char_ts=char_ts)
             self._next_seq += 1
             self._items.append(item)
             self._all.append(item)

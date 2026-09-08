@@ -68,9 +68,9 @@ async def meeting_detail(meeting_id: str) -> dict:
                  "start_ms": u.start_ms, "end_ms": u.end_ms}
                 for u in utts
             ],
-            # 会末重标注版（阿里 pipeline 切分 + ERes2NetV2 声纹标身份；无文字，段级时间）
+            # 会末重标注版（阿里 pipeline 切分 + ERes2NetV2 声纹标身份；段级时间+文字）
             "utterances_re": [
-                {"seq": u.seq, "speaker": u.speaker,
+                {"seq": u.seq, "speaker": u.speaker, "text": u.text,
                  "start_ms": u.start_ms, "end_ms": u.end_ms}
                 for u in re_utts
             ],

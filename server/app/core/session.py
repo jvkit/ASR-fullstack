@@ -26,6 +26,13 @@ from app.llm import client as llm_client
 logger = logging.getLogger(__name__)
 
 
+def _is_punct(ch: str) -> bool:
+    """中英文标点（FunASR timestamp 不含标点，对齐时跳过）。"""
+    import unicodedata
+
+    return unicodedata.category(ch).startswith("P") or ch.isspace()
+
+
 class MeetingSession:
     def __init__(self, meeting_id: str, title: str, recorder: str, replay_of: str | None = None) -> None:
         self.meeting_id = meeting_id
@@ -244,14 +251,25 @@ class MeetingSession:
         """流式临时字幕：立即广播，前端标注「识别中」。"""
         await self.broadcast({"type": "transcript_online", "text": text})
 
-    async def _on_asr_offline(self, text: str, timestamp: list, spk: str | None) -> None:
+    async def _on_asr_offline(self, text: str, timestamp: list, spk: str | None, char_ts: list) -> None:
         """句终确定结果：带说话人/时间戳，进缓冲 + 落库 + 广播。"""
         # FunASR 2pass-offline 返回 spk_name：注册声纹名 / 匿名"说话人1" / "unknown"
         speaker = "" if not spk or spk == "unknown" else spk
         start_ms = int(timestamp[0][0]) if timestamp else 0
         end_ms = int(timestamp[-1][1]) if timestamp else 0
+        # 字级时间戳 [[start_ms, end_ms], ...]：与 text 的非标点字逐一对齐
+        # （FunASR 的 timestamp 不含标点，标点继承前一字区间；ts 耗尽则用末条兜底）
+        chars: list = []
+        if char_ts:
+            prev = [int(char_ts[0][0]), int(char_ts[0][1])] if char_ts else [0, 0]
+            idx = 0
+            for ch in text:
+                if idx < len(char_ts) and not _is_punct(ch):
+                    prev = [int(char_ts[idx][0]), int(char_ts[idx][1])]
+                    idx += 1
+                chars.append([prev[0], prev[1]])
 
-        item = await self.buffer.add(speaker, text, start_ms, end_ms)
+        item = await self.buffer.add(speaker, text, start_ms, end_ms, char_ts=chars)
 
         async with SessionLocal() as db:
             db.add(Utterance(
@@ -261,6 +279,7 @@ class MeetingSession:
                 text=item.text,
                 start_ms=item.start_ms,
                 end_ms=item.end_ms,
+                char_timestamps=json.dumps(chars, ensure_ascii=False),
             ))
             await db.commit()
 
@@ -272,6 +291,10 @@ class MeetingSession:
             "start_ms": item.start_ms,
             "end_ms": item.end_ms,
         })
+        logger.info(
+            "meeting %s seq=%d spk=%r %d-%dms %s",
+            self.meeting_id, item.seq, item.speaker, item.start_ms, item.end_ms, item.text,
+        )
 
         # 滚动增强：句终驱动，攒够窗口后打标+纠错（后台执行不阻塞）
         if item.start_ms > 0 or item.end_ms > 0:
