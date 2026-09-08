@@ -30,8 +30,9 @@ logger = logging.getLogger(__name__)
 async def reannotate(meeting_id: str, pcm: bytes, speaker_count: int = 0) -> None:
     """会末重标注主入口（session.stop 里 asyncio.create_task 调用）。失败仅记日志。
 
-    speaker_count: 前端填写的参会人数（0=未填写）。>0 时直接作为 oracle，
-    否则退回「声纹库人数 + extra」的旧策略。
+    speaker_count: 前端填写的参会人数（0=未填写）。>0 时直接作为 oracle；
+    否则按 reannotate_oracle_mode 决定：auto=阿里自估（默认），
+    auto_tune=gpu 按簇内紧度扫 2..6 选优，registered=声纹库人数+extra。
     """
     try:
         if len(pcm) / 32000 < settings.reannotate_min_sec:
@@ -39,17 +40,24 @@ async def reannotate(meeting_id: str, pcm: bytes, speaker_count: int = 0) -> Non
             return
 
         wav_full = _pcm_to_wav(pcm)
-        # oracle 优先级：前端填写的参会人数 > 声纹库人数估计
+        # oracle 优先级：前端填写的参会人数 > 声纹库人数估计；策略见 reannotate_oracle_mode
+        data: dict[str, str] = {}
         if speaker_count and 1 <= speaker_count <= 15:
-            oracle = speaker_count
+            data["oracle_num"] = str(speaker_count)
         else:
-            oracle = await _next_oracle()
-
+            mode = settings.reannotate_oracle_mode
+            if mode == "auto_tune":
+                data["auto_tune"] = "true"
+            elif mode == "registered":
+                oracle = await _next_oracle()
+                if oracle:
+                    data["oracle_num"] = str(oracle)
+            # mode == "auto"：不传 oracle，让阿里自估（实测效果最稳）
         async with httpx.AsyncClient(timeout=600) as cli:
             r = await cli.post(
                 f"{settings.diarize_http_url}/diarize_labeled",
                 files={"file": (f"{meeting_id}.wav", wav_full, "audio/wav")},
-                data={"oracle_num": oracle or ""},
+                data=data,
             )
             r.raise_for_status()
             diar = r.json()

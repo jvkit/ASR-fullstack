@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     # 会末重标注（gpu diarize 服务）
     diarize_http_url: str = "http://192.168.30.87:10096"  # 阿里 pipeline 切分 + ERes2NetV2 声纹
     reannotate_oracle_extra: int = 1      # 人数估计 = 注册声纹数 + 此值（宁多勿少，按名合并自愈）
+    reannotate_oracle_mode: str = "auto"  # 未填人数时的 oracle 策略：auto=让阿里自估 | registered=注册数+extra | auto_tune=按簇内紧度扫 2..6
     reannotate_max_oracle: int = 8        # 重标注人数上限
     reannotate_min_sec: int = 10          # 短于此秒数不做重标注
     diarize_max_oracle: int = 8           # 阿里 pipeline 自动模式人数候选上限（自动估计时在 2..N 里挑）
