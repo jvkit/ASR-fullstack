@@ -101,7 +101,7 @@ async function downloadMarkdown() {
     </van-cell-group>
 
     <van-cell-group inset class="block" title="录音回放">
-      <div class="audio-wrap">
+      <div class="audio-sticky">
         <audio v-if="audioUrl" controls :src="audioUrl" class="audio-el"></audio>
         <van-empty v-else description="本场会议无录音" image-size="64" />
       </div>
@@ -191,7 +191,13 @@ async function downloadMarkdown() {
 .detail-head { display: flex; align-items: center; gap: 8px; padding: 4px 8px 8px; }
 .detail-title { flex: 1; font-weight: 600; font-size: 15px; word-break: break-word; }
 .block { margin-top: 12px; }
-.audio-wrap { padding: 8px 16px; }
+.audio-sticky {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  background: #fff;
+  padding: 8px 16px;
+}
 .audio-el { width: 100%; }
 .replay-row { padding: 0 16px 12px; }
 .replay-tip { font-size: 12px; color: #969799; margin-top: 6px; text-align: center; }
