@@ -29,3 +29,6 @@ eval/aishell4/test.tar.gz
 eval/aishell4/test/wav/
 eval/aishell4/*.wav
 eval/enrolls/
+eval/aishell4/test/wav/
+eval/aishell4/chunks/
+eval/aishell4/*.wav
