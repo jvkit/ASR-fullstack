@@ -23,3 +23,9 @@ Thumbs.db
 # 会议录音
 server/recordings/
 scripts/wavs/
+
+# 评测数据（大文件，不入库）
+eval/aishell4/test.tar.gz
+eval/aishell4/test/wav/
+eval/aishell4/*.wav
+eval/enrolls/
