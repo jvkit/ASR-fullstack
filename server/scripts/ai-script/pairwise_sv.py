@@ -76,6 +76,14 @@ def main() -> None:
                 row += f"{s:6.3f} "
         print(row)
 
+    print(f"\n=== 每人一览：与库内其他人的相似度（区间/平均/中位 + 最像的人）===")
+    print(f"  {'人名':12s} {'区间(min~max)':>16s} {'平均':>7s} {'中位':>7s}  最像的人(值)")
+    for a in names:
+        sims_a = sorted(((float(np.dot(centroids[a], centroids[b])), b) for b in names if b != a))
+        vals_a = [s for s, _ in sims_a]
+        top_s, top_b = sims_a[-1]
+        print(f"  {a:12s} {min(vals_a):6.3f} ~ {max(vals_a):5.3f} {float(np.mean(vals_a)):7.3f} {float(np.median(vals_a)):7.3f}  {top_b}({top_s:.3f})")
+
     pairs.sort(reverse=True)
     print(f"\n=== 最像的 5 对（危险对，越接近自匹配带越难分）===")
     for s, a, b in pairs[:5]:
