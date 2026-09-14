@@ -98,9 +98,11 @@ def main() -> None:
         if best is None or err < best[0]:
             best = (err, mapping)
     err, mapping = best
-    conf_frames = err - miss_frames - fa_frames
+    # err = GT 语音帧中未判对的 = miss + confusion（FA 不在 GT 语音里，不计入 err）
+    conf_frames = err - miss_frames
+    fa = fa_frames
 
-    der = (miss_frames + fa_frames + conf_frames) / max(1, gt_total)
+    der = (miss_frames + fa + conf_frames) / max(1, gt_total)
     lines = [
         f"meeting: {args.meeting_id}",
         f"rttm: {args.rttm} (前 {args.max_sec or total_ms/1000:.0f}s)",

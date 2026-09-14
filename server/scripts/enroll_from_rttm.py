@@ -84,7 +84,7 @@ def parse_intro_name(texts: list[str]) -> str | None:
     m = re.search(r"(?<!\d)(\d{3})(?!\d)([%s]{0,3}[一-龥]{1,4})" % FILLER, norm)
     if not m:
         return None
-    role = m.group(2).strip(FILLER)[:4]
+    role = m.group(2).strip(FILLER)[:5]
     role = ROLE_ALIAS.get(role, role)
     return f"{m.group(1)}-{role}" if role else m.group(1)
 
