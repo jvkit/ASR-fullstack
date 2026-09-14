@@ -32,11 +32,13 @@ logger = logging.getLogger(__name__)
 
 
 class MeetingSession:
-    def __init__(self, meeting_id: str, title: str, recorder: str, replay_of: str | None = None) -> None:
+    def __init__(self, meeting_id: str, title: str, recorder: str,
+                 replay_of: str | None = None, client_replay: bool = False) -> None:
         self.meeting_id = meeting_id
         self.title = title
         self.recorder = recorder
-        self.replay_of = replay_of  # 非空=重放测试：音频来自历史录音而非麦克风
+        self.replay_of = replay_of  # 非空=服务端重放：音频来自 recordings/<id>.wav
+        self.client_replay = client_replay  # 客户端脚本重放（音频由客户端喂，仅打标记）
         self.replay_done = asyncio.Event()  # 重放音频喂完置位（供 ws 循环感知自动结束）
         self.clients: set[WebSocket] = set()
         self.buffer = UtteranceBuffer()
@@ -103,8 +105,13 @@ class MeetingSession:
         """会末收尾（后台）：尾巴批次 → 最终总结/标题/标签/属性 + 全场重跑。失败仅记日志。"""
         session_id = self.meeting_id
         try:
-            # 尾巴音频（不足一批的结尾）也走一批，保证全文完整
-            await self._run_batch(force=True)
+            # 尾巴音频分块 flush（每块最多 60s）：高速重放时积压可能有几分钟，
+            # 一口吞会超时；普通会议通常一块就够
+            while (len(self._audio) - self._processed) / 32 >= 1000:  # 剩余 ≥1s
+                before = self._processed
+                await self._run_batch(force=True, max_chunk_ms=60_000)
+                if self._processed == before:
+                    break  # 失败重试无进展（连续失败 3 次后丢弃），防死循环
 
             rolling_summary = await self.enhancer.finish()
 
@@ -117,7 +124,7 @@ class MeetingSession:
 
             final_title = result["title"]
             # 重放测试会议：标题保留「重放测试」标记（LLM 生成标题后仍追加，便于区分）
-            if self.replay_of and final_title and "重放测试" not in final_title:
+            if (self.replay_of or self.client_replay) and final_title and "重放测试" not in final_title:
                 final_title = f"{final_title}（重放测试）"
             final_summary = result["summary"] or rolling_summary
             final_tags = result["tags"][:settings.final_tags_count]
@@ -195,10 +202,11 @@ class MeetingSession:
         except asyncio.CancelledError:
             raise
 
-    async def _run_batch(self, force: bool = False) -> None:
+    async def _run_batch(self, force: bool = False, max_chunk_ms: int | None = None) -> None:
         """切一批音频送 GPU 管线，句子落库 + 广播 + 驱动增强。
 
-        force=True（会末 flush）：剩余音频全送，不管大小和切点。
+        force=True（会末 flush）：剩余音频全送，不管大小和切点；
+        max_chunk_ms 限定单块上限（flush 用，防高速重放下积压音频一口吞超时）。
         失败不推进 _processed（下轮重试）；连续失败 3 次丢弃这段防积压。
         """
         total = len(self._audio)
@@ -209,6 +217,8 @@ class MeetingSession:
 
         if force:
             cut_ms = pending_ms
+            if max_chunk_ms and cut_ms > max_chunk_ms:
+                cut_ms = float(max_chunk_ms)
         else:
             if pending_ms < settings.pipeline_batch_min_sec * 1000:
                 return
@@ -359,9 +369,11 @@ class SessionManager:
     def __init__(self) -> None:
         self._sessions: dict[str, MeetingSession] = {}
 
-    def create(self, title: str, recorder: str, replay_of: str | None = None) -> MeetingSession:
+    def create(self, title: str, recorder: str, replay_of: str | None = None,
+               client_replay: bool = False) -> MeetingSession:
         meeting_id = uuid.uuid4().hex[:12]
-        session = MeetingSession(meeting_id, title, recorder, replay_of=replay_of)
+        session = MeetingSession(meeting_id, title, recorder, replay_of=replay_of,
+                                 client_replay=client_replay)
         self._sessions[meeting_id] = session
         return session
 

@@ -61,6 +61,7 @@ async def meeting_ws(ws: WebSocket) -> None:
             title=str(ctrl.get("title") or "未命名会议"),
             recorder=str(ctrl.get("recorder") or ""),
             replay_of=replay_of,
+            client_replay=bool(ctrl.get("client_replay")),
         )
         session.clients.add(ws)
         await session.start()

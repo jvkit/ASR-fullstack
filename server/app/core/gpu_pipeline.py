@@ -45,10 +45,11 @@ async def vad_ends(pcm: bytes) -> list[float] | None:
         return None
 
 
-async def meeting_chunk(pcm: bytes, hotwords: str = "") -> list[dict] | None:
+async def meeting_chunk(pcm: bytes, hotwords: str = "", timeout_sec: float | None = None) -> list[dict] | None:
     """一体化管线：音频 -> 带说话人的子段列表（时间相对本块音频，秒）。
 
     返回 [{start, end, speaker, text}]；失败返回 None。
+    timeout_sec: 覆盖默认 pipeline_chunk_timeout_sec（会末全场重跑传大值）。
     """
     try:
         data: dict = {
@@ -57,7 +58,7 @@ async def meeting_chunk(pcm: bytes, hotwords: str = "") -> list[dict] | None:
         }
         if hotwords:
             data["hotwords"] = hotwords
-        async with httpx.AsyncClient(timeout=settings.pipeline_chunk_timeout_sec) as cli:
+        async with httpx.AsyncClient(timeout=timeout_sec or settings.pipeline_chunk_timeout_sec) as cli:
             r = await cli.post(
                 f"{settings.diarize_http_url}/meeting_chunk",
                 files={"file": ("chunk.wav", pcm_to_wav(pcm), "audio/wav")},
