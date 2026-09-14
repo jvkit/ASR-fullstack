@@ -108,7 +108,7 @@ def _fmt_lines(lines: list[tuple[str, str]]) -> str:
 
 def build_enhance_messages(summary: str, prev_lines: list[tuple[str, str]],
                            cur_lines: list[tuple[str, str]]) -> list[dict]:
-    """合并调用（纠错+修正上轮+滚动纪要）的提示词构造。供 roller 每轮调用。"""
+    """合并调用（纠错+修正上轮+滚动纪要）的提示词构造。供 enhancer 每批调用。"""
     parts = [f"【当前滚动纪要】\n{summary or '（无，这是第一轮）'}"]
     if prev_lines:
         parts.append(f"【上一轮文本（请检查并修正，与本轮一起输出）】\n{_fmt_lines(prev_lines)}")

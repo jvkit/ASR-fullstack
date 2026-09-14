@@ -106,6 +106,6 @@ def build_correction_messages(context: str, summary: str, window_text: str) -> l
 
 def build_enhance_messages(summary: str, prev_lines: list[tuple[str, str]],
                            cur_lines: list[tuple[str, str]]) -> list[dict]:
-    """合并调用（纠错+修正上轮+滚动纪要）提示词构造（供 roller 每轮调用）。"""
+    """合并调用（纠错+修正上轮+滚动纪要）提示词构造（供 enhancer 每批调用）。"""
     return prompts.build_enhance_messages(summary, prev_lines, cur_lines)
 

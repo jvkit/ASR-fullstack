@@ -2,12 +2,12 @@
 
 export type ServerMessage =
   | { type: 'started'; meeting_id: string }
-  | { type: 'transcript_online'; text: string }
   | { type: 'transcript'; seq: number; speaker: string; text: string; start_ms: number; end_ms: number }
   | { type: 'transcript_update'; seq: number; speaker: string; text: string; start_ms: number; end_ms: number; corrected?: boolean }
   | { type: 'summary'; seq: number; final: boolean; title: string; points: string[]; action_items: unknown[]; attributes: unknown[] }
   | { type: 'attributes'; title: string; attributes: { key: string; value: string }[] }
   | { type: 'ended'; meeting_id: string }
+  | { type: 'reannotated'; meeting_id: string }
   | { type: 'error'; message: string }
 
 export class MeetingWs {
@@ -27,22 +27,8 @@ export class MeetingWs {
     return this.ws?.readyState === WebSocket.OPEN
   }
 
-  start(
-    title: string,
-    opts?: { spkThreshold?: number; spkMatchThreshold?: number; reannotateNameThreshold?: number;
-             speakerCount?: number; maxSpeakers?: number;
-             vadMaxEndSilenceMs?: number; vadMaxSegmentSec?: number; spkMinSegSec?: number;
-             replayOf?: string },
-  ): void {
+  start(title: string, opts?: { replayOf?: string }): void {
     const payload: Record<string, unknown> = { type: 'start', title }
-    if (opts?.spkThreshold !== undefined) payload.spk_threshold = opts.spkThreshold
-    if (opts?.spkMatchThreshold !== undefined) payload.spk_match_threshold = opts.spkMatchThreshold
-    if (opts?.reannotateNameThreshold !== undefined) payload.reannotate_name_threshold = opts.reannotateNameThreshold
-    if (opts?.speakerCount !== undefined && opts.speakerCount > 0) payload.speaker_count = opts.speakerCount
-    if (opts?.maxSpeakers !== undefined && opts.maxSpeakers > 0) payload.max_speakers = opts.maxSpeakers
-    if (opts?.vadMaxEndSilenceMs !== undefined) payload.vad_max_end_silence_ms = opts.vadMaxEndSilenceMs
-    if (opts?.vadMaxSegmentSec !== undefined) payload.vad_max_segment_sec = opts.vadMaxSegmentSec
-    if (opts?.spkMinSegSec !== undefined) payload.spk_min_seg_sec = opts.spkMinSegSec
     if (opts?.replayOf) payload.replay_of = opts.replayOf
     this.ws?.send(JSON.stringify(payload))
   }

@@ -10,7 +10,6 @@ interface Utterance {
 
 const props = defineProps<{
   utterances: Utterance[]
-  onlineText: string
   speakers: string[]
   colorOf: (speaker: string) => string
 }>()
@@ -54,8 +53,7 @@ watch(
         <span class="utt-text" :class="{ draft: u.draft }">{{ u.text }}</span>
         <van-tag v-if="u.draft" size="mini" plain type="default" class="draft-tag">识别中</van-tag>
       </div>
-      <div v-if="onlineText" class="online">{{ onlineText }}…</div>
-      <van-empty v-if="!utterances.length && !onlineText" description="开始说话后将实时显示转写" />
+      <van-empty v-if="!utterances.length" description="开始说话后将按批次显示转写（约 8 秒一批）" />
     </div>
   </van-cell-group>
 </template>
@@ -68,6 +66,5 @@ watch(
 .utt-text.draft { color: #999; font-style: italic; }
 .draft-tag { flex-shrink: 0; color: #bbb; }
 .spk-tag { flex-shrink: 0; }
-.online { color: #999; font-style: italic; padding-left: 2px; }
 @media (min-width: 768px) { .list { height: 60vh; } }
 </style>

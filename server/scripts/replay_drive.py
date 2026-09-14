@@ -1,6 +1,6 @@
-"""驱动 WS 重放 7min 音频，走完整真实管线（FunASR 实时->roller->LLM->会后重标注）。
+"""驱动 WS 重放历史录音，走完整真实管线（批次管线->LLM增强->会末终版）。
 
-不注入任何数据：实时版句子、会后版子段全部由 pipeline 产出。
+不注入任何数据：会议中批次、会后终版子段全部由 /meeting_chunk 产出。
 用法: python scripts/replay_drive.py <wav_name> [title]
 """
 import asyncio
@@ -20,8 +20,6 @@ async def main() -> None:
             "type": "start",
             "title": title,
             "replay_of": wav_name,
-            "speaker_count": 6,
-            "reannotate_name_threshold": 0.30,
         }))
         meeting_id = None
         n_transcript = 0
@@ -41,7 +39,7 @@ async def main() -> None:
             elif t == "error":
                 print("ERROR:", msg.get("message"), flush=True)
                 sys.exit(1)
-        # ended 后等会后重标注（异步任务）落库
+        # ended 后等会末重标注（异步任务）落库
         await asyncio.sleep(5)
     print("DONE %s" % meeting_id, flush=True)
 

@@ -16,16 +16,13 @@ router = APIRouter(prefix="/api", tags=["meetings"])
 
 @router.get("/config")
 async def get_config() -> dict:
-    """可调参数只此一处：前端默认值、session 默认值、手动重标注全部从这里读。"""
+    """可调参数只此一处：前端默认值、批次管线、手动重标注全部从这里读。"""
     return {
-        "spk_threshold": settings.spk_threshold,                # 说话人聚类阈值（实时）
-        "spk_match_threshold": settings.spk_match_threshold,    # 注册声纹匹配阈值（实时）
-        "reannotate_name_threshold": settings.reannotate_name_threshold,  # 会末重标注声纹阈值
-        "speaker_count": 0,                                     # 参会人数（0=自动，前端每会可填）
-        "max_speakers": settings.spk_max_speakers,              # 实时聚类人数上限（0=不限）
-        "vad_max_end_silence_ms": settings.vad_max_end_silence_ms,
-        "vad_max_segment_sec": settings.vad_max_segment_sec,
-        "spk_min_seg_sec": settings.spk_min_seg_sec,
+        "reannotate_name_threshold": settings.reannotate_name_threshold,  # 认人阈值（批次/终版/手动共用一个）
+        "pipeline_batch_min_sec": settings.pipeline_batch_min_sec,        # 攒够这么多音频成一批
+        "pipeline_batch_max_sec": settings.pipeline_batch_max_sec,        # 超过强制成批
+        "pipeline_tick_sec": settings.pipeline_tick_sec,                  # 批次调度检查间隔
+        "pipeline_vad_max_end_silence_ms": settings.pipeline_vad_max_end_silence_ms,
     }
 
 
@@ -94,12 +91,11 @@ async def meeting_detail(meeting_id: str) -> dict:
 
 @router.post("/meetings/{meeting_id}/reannotate")
 async def meeting_reannotate(
-    meeting_id: str, speaker_count: int = 0, name_threshold: float = 0
+    meeting_id: str, name_threshold: float = 0
 ) -> dict:
     """手动触发会末重标注（历史会议补跑 / 失败重试）。
 
-    speaker_count>0 时作为 oracle；name_threshold 在 (0,1) 时作为声纹匹配阈值，
-    否则用 config 默认。
+    name_threshold 在 (0,1) 时作为声纹匹配阈值，否则用 config 默认。
     """
     from app.core.reannotate import reannotate_for_meeting
 
@@ -107,7 +103,7 @@ async def meeting_reannotate(
         if not await db.get(Meeting, meeting_id):
             raise HTTPException(404, "meeting not found")
     thr = name_threshold if 0 < name_threshold < 1 else None
-    started = await reannotate_for_meeting(meeting_id, speaker_count=speaker_count, name_threshold=thr)
+    started = await reannotate_for_meeting(meeting_id, name_threshold=thr)
     if not started:
         raise HTTPException(404, "recording not found")
     return {"ok": True, "meeting_id": meeting_id}

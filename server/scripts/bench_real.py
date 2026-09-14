@@ -50,7 +50,7 @@ def restore_library() -> None:
 async def replay(wav_name: str, title: str) -> str:
     async with websockets.connect(WS_URL, max_size=64 * 1024 * 1024) as ws:
         await ws.send(json.dumps({"type": "start", "title": title,
-                                  "replay_of": wav_name, "speaker_count": 0}))
+                                  "replay_of": wav_name}))
         mid = None
         while True:
             msg = json.loads(await ws.recv())

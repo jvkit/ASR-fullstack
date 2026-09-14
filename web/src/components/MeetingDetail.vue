@@ -21,12 +21,15 @@ const meetingId = ref('')
 const attrs = ref<Attr[]>([])
 const startedAt = ref('')
 const audioUrl = ref('')
-const utterances = ref<Utterance[]>([])
-const reSegs = ref<ReSeg[]>([])
+const utterances = ref<Utterance[]>([])   // 会中批次版（准实时）
+const reSegs = ref<ReSeg[]>([])           // 会末终版（全场重跑，更准）
+const reannotated = ref(false)
 const reLoading = ref(false)
-const reSpeakerCount = ref(0) // 手动重标注时可选指定人数（0=自动）
 const summaries = ref<SummaryRow[]>([])
 const loading = ref(true)
+
+// 单一转写视图：终版生成后展示终版，未生成前展示会中批次版
+const displaySegs = ref<ReSeg[]>([])
 
 const speakerColors = ['#e6646c', '#3aa675', '#3b7fe0', '#a06ee1', '#d98e32', '#2ba0b8', '#c2568c', '#6a8f3c']
 const speakerColorMap = new Map<string, string>()
@@ -74,6 +77,9 @@ async function load() {
     audioUrl.value = detail.audio_url || ''
     utterances.value = detail.utterances || []
     reSegs.value = detail.utterances_re || []
+    reannotated.value = !!detail.reannotated
+    // 终版优先；终版还没跑完（会末异步任务）则先展示会中批次版
+    displaySegs.value = reSegs.value.length ? reSegs.value : utterances.value
     summaries.value = (sumResp as SummaryRow[]) || []
     // 等 DOM 渲染出 audio slot 后再挂观察器
     setTimeout(setupAudioPin, 0)
@@ -85,7 +91,7 @@ async function load() {
 async function rerunReannotate() {
   reLoading.value = true
   try {
-    await fetch(`/api/meetings/${props.meetingId}/reannotate?speaker_count=${reSpeakerCount.value || 0}`, { method: 'POST' })
+    await fetch(`/api/meetings/${props.meetingId}/reannotate`, { method: 'POST' })
     await load()
   } finally {
     reLoading.value = false
@@ -141,27 +147,21 @@ async function downloadMarkdown() {
         <van-button size="small" type="primary" plain block icon="play-circle-o" @click="emit('replay', props.meetingId, title)">
           用本场录音重新测试（重放）
         </van-button>
-        <div class="replay-tip">模拟实时开会：同步播放录音 + 实时转写/打标/纠错/总结</div>
+        <div class="replay-tip">模拟真实开会：同步播放录音 + 批次转写/纠错/总结/会末终版</div>
       </div>
     </van-cell-group>
 
-    <van-cell-group inset class="block" title="会后版（阿里 pipeline + 声纹）">
-      <div v-if="reSegs.length" class="re-seg-head">
-        <span class="re-seg-tip">人数：</span>
-        <van-stepper
-          v-model="reSpeakerCount"
-          :min="0"
-          :max="15"
-          :integer="true"
-          theme="primary"
-          style="margin-right: 8px"
-        />
+    <van-cell-group inset class="block" title="转写记录">
+      <div class="re-seg-head">
+        <van-tag v-if="reannotated" type="success" size="medium">会末终版</van-tag>
+        <van-tag v-else type="warning" size="medium" plain>会中批次版</van-tag>
         <van-button size="small" plain type="primary" :loading="reLoading" @click="rerunReannotate">
           重新标注
         </van-button>
+        <span class="re-seg-tip">{{ reannotated ? '全场重跑，边界与说话人最准' : '终版生成中或失败时可手动重跑' }}</span>
       </div>
-      <div v-if="reSegs.length" class="re-list">
-        <div v-for="s in reSegs" :key="s.seq" class="re-item">
+      <div v-if="displaySegs.length" class="re-list">
+        <div v-for="s in displaySegs" :key="s.seq" class="re-item">
           <van-tag
             plain
             class="spk-tag"
@@ -174,23 +174,7 @@ async function downloadMarkdown() {
           </span>
         </div>
       </div>
-      <van-empty v-else description="尚未生成重标注（结束数分钟后自动完成，或手动触发）" image-size="64" />
-    </van-cell-group>
-
-    <van-cell-group inset class="block" title="逐句转写（实时版）">
-      <div class="utts">
-        <div v-for="u in utterances" :key="u.seq" class="utt">
-          <van-tag
-            plain
-            class="spk-tag"
-            :style="{ borderColor: colorOf(u.speaker), color: colorOf(u.speaker) }"
-          >
-            {{ u.speaker || '发言人' }}
-          </van-tag>
-          <span class="utt-text">{{ u.text }}</span>
-        </div>
-        <van-empty v-if="!utterances.length" description="本场会议没有有效转写" image-size="64" />
-      </div>
+      <van-empty v-else description="本场会议没有有效转写" image-size="64" />
     </van-cell-group>
 
     <van-cell-group inset class="block" title="总结">

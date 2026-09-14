@@ -37,7 +37,6 @@ const insecure = ref(false) // http 非安全上下文：浏览器禁止麦克�
 const recording = ref(false)
 const paused = ref(false)
 const meetingId = ref('')
-const onlineText = ref('') // 流式临时字幕
 const utterances = ref<Utterance[]>([])
 const summaries = ref<SummaryItem[]>([])
 const liveAttrs = ref<{ key: string; value: string }[]>([]) // 实时提取的事实性属性
@@ -69,11 +68,7 @@ function handleMessage(msg: ServerMessage) {
     case 'started':
       meetingId.value = msg.meeting_id
       break
-    case 'transcript_online':
-      if (!paused.value) onlineText.value = msg.text
-      break
     case 'transcript':
-      onlineText.value = ''
       utterances.value.push({ seq: msg.seq, speaker: msg.speaker || '发言人', text: msg.text, draft: true })
       colorOf(msg.speaker || '发言人')
       break
@@ -109,6 +104,9 @@ function handleMessage(msg: ServerMessage) {
       }
       meetingCount.value++
       break
+    case 'reannotated':
+      showToast({ message: '会末终版转写已生成，可在历史会议查看', type: 'success', duration: 3000 })
+      break
     case 'error':
       errorMsg.value = msg.message
       showToast({ message: msg.message, type: 'fail', duration: 4000 })
@@ -116,17 +114,7 @@ function handleMessage(msg: ServerMessage) {
   }
 }
 
-async function onStart(payload: {
-  title: string
-  spkThreshold: number
-  spkMatchThreshold: number
-  reannotateNameThreshold: number
-  speakerCount: number
-  maxSpeakers: number
-  vadMaxEndSilenceMs: number
-  vadMaxSegmentSec: number
-  spkMinSegSec: number
-}) {
+async function onStart(payload: { title: string }) {
   if (insecure.value) {
     showToast({ message: 'http 访问下浏览器禁止麦克风，请用 https 地址打开', type: 'fail', duration: 4000 })
     return
@@ -134,7 +122,6 @@ async function onStart(payload: {
   errorMsg.value = ''
   utterances.value = []
   summaries.value = []
-  onlineText.value = ''
   liveAttrs.value = []
   speakerColorMap.clear()
 
@@ -158,16 +145,7 @@ async function onStart(payload: {
     ws.close()
     return
   }
-  ws.start(payload.title, {
-    spkThreshold: payload.spkThreshold,
-    spkMatchThreshold: payload.spkMatchThreshold,
-    reannotateNameThreshold: payload.reannotateNameThreshold,
-    speakerCount: payload.speakerCount || undefined,
-    maxSpeakers: payload.maxSpeakers || undefined,
-    vadMaxEndSilenceMs: payload.vadMaxEndSilenceMs,
-    vadMaxSegmentSec: payload.vadMaxSegmentSec,
-    spkMinSegSec: payload.spkMinSegSec,
-  })
+  ws.start(payload.title)
   recording.value = true
 }
 
@@ -191,7 +169,7 @@ async function onStop() {
   paused.value = false
 }
 
-// 重放测试：用历史录音当音频源，走完整实时管线（不开麦克风）
+// 重放测试：用历史录音当音频源，走完整真实管线（不开麦克风）
 async function onReplayStart(sourceId: string, title: string) {
   if (insecure.value) {
     showToast({ message: '重放测试需在安全上下文下进行', type: 'fail', duration: 4000 })
@@ -200,7 +178,6 @@ async function onReplayStart(sourceId: string, title: string) {
   errorMsg.value = ''
   utterances.value = []
   summaries.value = []
-  onlineText.value = ''
   liveAttrs.value = []
   speakerColorMap.clear()
   replaying.value = true
@@ -210,20 +187,8 @@ async function onReplayStart(sourceId: string, title: string) {
 
   await ws.connect()
   ws.onMessage(handleMessage)
-  // 不开麦：直接 start，replay_of 让后端读历史录音喂 ASR
-  // 参数唯一来源 /api/config（与 config.py 一致）；speakerCount=2 为重放测试固定
-  const cfg = await fetch('/api/config').then((r) => r.json()).catch(() => ({}))
-  ws.start(`${title}（重放测试）`, {
-    speakerCount: 2, // 重放测试固定两人
-    spkThreshold: Number(cfg?.spk_threshold ?? 0.55),
-    spkMatchThreshold: Number(cfg?.spk_match_threshold ?? 0.40),
-    reannotateNameThreshold: Number(cfg?.reannotate_name_threshold ?? 0.30),
-    maxSpeakers: Number(cfg?.max_speakers ?? 0),
-    vadMaxEndSilenceMs: Number(cfg?.vad_max_end_silence_ms ?? 350),
-    vadMaxSegmentSec: Number(cfg?.vad_max_segment_sec ?? 8),
-    spkMinSegSec: Number(cfg?.spk_min_seg_sec ?? 1.0),
-    replayOf: sourceId,
-  })
+  // 不开麦：直接 start，replay_of 让后端读历史录音按真实节奏喂入
+  ws.start(`${title}（重放测试）`, { replayOf: sourceId })
   recording.value = true
 }
 
@@ -317,7 +282,7 @@ onMounted(() => {
           </van-tag>
         </div>
         <div class="live-panels">
-          <LiveTranscript :utterances="utterances" :online-text="onlineText" :speakers="knownSpeakers" :color-of="colorOf" />
+          <LiveTranscript :utterances="utterances" :speakers="knownSpeakers" :color-of="colorOf" />
           <SummaryPanel :summaries="summaries" :meeting-id="meetingId" />
         </div>
       </template>
@@ -341,7 +306,6 @@ onMounted(() => {
         <div class="live-panels">
           <LiveTranscript
             :utterances="utterances"
-            :online-text="onlineText"
             :speakers="knownSpeakers"
             :color-of="colorOf"
           />

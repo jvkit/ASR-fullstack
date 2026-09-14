@@ -1,79 +1,22 @@
 <script setup lang="ts">
-import { onMounted, reactive, ref, watch } from 'vue'
+import { reactive } from 'vue'
 
 const props = defineProps<{ recording: boolean; paused: boolean; insecure: boolean }>()
 const emit = defineEmits<{
-  start: [payload: {
-    title: string
-    spkThreshold: number
-    spkMatchThreshold: number
-    reannotateNameThreshold: number
-    speakerCount: number
-    maxSpeakers: number
-    vadMaxEndSilenceMs: number
-    vadMaxSegmentSec: number
-    spkMinSegSec: number
-  }]
+  start: [payload: { title: string }]
   pause: []
   resume: []
   stop: []
 }>()
 
-// 默认值唯一来源：后端 /api/config（与 config.py 一致）。启动时拉取，失败用下方兜底值。
+// 非实时批次架构：说话人/VAD/阈值全部收敛在服务端 config，前端无调参项
 const form = reactive({
   title: '未命名会议',
-  spkThreshold: 0.55,
-  spkMatchThreshold: 0.40,
-  reannotateNameThreshold: 0.30,
-  speakerCount: 0,
-  maxSpeakers: 0,
-  vadMaxEndSilenceMs: 350,
-  vadMaxSegmentSec: 8,
-  spkMinSegSec: 1.0,
 })
-
-// 默认值唯一来源：后端 /api/config（与 config.py 一致）。启动时拉取，失败用兜底值。
-onMounted(async () => {
-  try {
-    const cfg = await fetch('/api/config').then((r) => r.json())
-    if (cfg) {
-      if (cfg.spk_threshold != null) form.spkThreshold = Number(cfg.spk_threshold)
-      if (cfg.spk_match_threshold != null) form.spkMatchThreshold = Number(cfg.spk_match_threshold)
-      if (cfg.reannotate_name_threshold != null) form.reannotateNameThreshold = Number(cfg.reannotate_name_threshold)
-      if (cfg.max_speakers != null) form.maxSpeakers = Number(cfg.max_speakers)
-      if (cfg.vad_max_end_silence_ms != null) form.vadMaxEndSilenceMs = Number(cfg.vad_max_end_silence_ms)
-      if (cfg.vad_max_segment_sec != null) form.vadMaxSegmentSec = Number(cfg.vad_max_segment_sec)
-      if (cfg.spk_min_seg_sec != null) form.spkMinSegSec = Number(cfg.spk_min_seg_sec)
-    }
-  } catch {
-    // 拉取失败：保留兜底默认值
-  }
-})
-
-const showAdvanced = ref(false)
-// 录音开始后不允许改参数，面板自动收起
-watch(() => props.recording, (rec) => { if (rec) showAdvanced.value = false })
-
-function clampThr(v: number, dft: number): number {
-  const n = Number(v)
-  return Number.isFinite(n) && n > 0 && n < 1 ? n : dft
-}
 
 function start() {
   if (!form.title.trim()) return
-  const thr = Number(form.spkThreshold)
-  emit('start', {
-    title: form.title.trim(),
-    spkThreshold: Number.isFinite(thr) && thr > 0 && thr < 1 ? thr : 0.55,
-    spkMatchThreshold: clampThr(form.spkMatchThreshold, 0.40),
-    reannotateNameThreshold: clampThr(form.reannotateNameThreshold, 0.30),
-    // 0 = 不指定（后端自动估计）；>0 = 明确告知参会人数
-    speakerCount: Number.isFinite(form.speakerCount) && form.speakerCount > 0 ? Math.floor(form.speakerCount) : 0,
-    maxSpeakers: Number.isFinite(form.maxSpeakers) && form.maxSpeakers > 0 ? Math.floor(form.maxSpeakers) : 0,
-    vadMaxEndSilenceMs: Math.max(100, Math.floor(form.vadMaxEndSilenceMs || 350)),
-    vadMaxSegmentSec: Math.max(2, Math.floor(form.vadMaxSegmentSec || 8)),
-    spkMinSegSec: Math.max(0, Number(form.spkMinSegSec) || 0),
-  })
+  emit('start', { title: form.title.trim() })
 }
 
 function togglePause() {
@@ -89,119 +32,6 @@ function togglePause() {
       placeholder="未命名会议"
       :disabled="recording"
     />
-    <van-field label="参会人数">
-      <template #input>
-        <van-stepper
-          v-model="form.speakerCount"
-          :min="0"
-          :max="15"
-          :integer="true"
-          :disabled="recording"
-        />
-        <span class="thr-tip">0=自动估计；填真实人数可显著提升说话人区分</span>
-      </template>
-    </van-field>
-
-    <!-- 高级设置（折叠面板）：说话人/VAD 调参 -->
-    <div class="adv-toggle" @click="showAdvanced = !showAdvanced">
-      <span>{{ showAdvanced ? '▾' : '▸' }} 高级设置</span>
-      <span class="adv-hint">说话人区分 / 切句调优</span>
-    </div>
-    <div v-show="showAdvanced" class="adv-panel">
-      <van-field label="聚类阈值">
-        <template #input>
-          <van-stepper
-            :model-value="form.spkThreshold"
-            :min="0.3"
-            :max="0.95"
-            :step="0.05"
-            :decimal-length="2"
-            :disabled="recording"
-            @change="(v: number) => (form.spkThreshold = v)"
-          />
-          <span class="thr-tip">高=不易并人，低=更宽松</span>
-        </template>
-      </van-field>
-      <van-field label="声纹匹配阈值">
-        <template #input>
-          <van-stepper
-            :model-value="form.spkMatchThreshold"
-            :min="0.1"
-            :max="0.9"
-            :step="0.05"
-            :decimal-length="2"
-            :disabled="recording"
-            @change="(v: number) => (form.spkMatchThreshold = v)"
-          />
-          <span class="thr-tip">实时：与注册声纹比对的命中线（默认 0.40）</span>
-        </template>
-      </van-field>
-      <van-field label="重标注阈值">
-        <template #input>
-          <van-stepper
-            :model-value="form.reannotateNameThreshold"
-            :min="0.1"
-            :max="0.9"
-            :step="0.05"
-            :decimal-length="2"
-            :disabled="recording"
-            @change="(v: number) => (form.reannotateNameThreshold = v)"
-          />
-          <span class="thr-tip">会末重标注：逐段声纹命中线（默认 0.30）</span>
-        </template>
-      </van-field>
-      <van-field label="人数上限">
-        <template #input>
-          <van-stepper
-            v-model="form.maxSpeakers"
-            :min="0"
-            :max="15"
-            :integer="true"
-            :disabled="recording"
-          />
-          <span class="thr-tip">0=不限制；>0 时实时聚类最多 N 人，超出并入最相近者</span>
-        </template>
-      </van-field>
-      <van-field label="断句静音(ms)">
-        <template #input>
-          <van-stepper
-            v-model="form.vadMaxEndSilenceMs"
-            :min="100"
-            :max="1500"
-            :step="50"
-            :integer="true"
-            :disabled="recording"
-          />
-          <span class="thr-tip">小=切句快出字快，大=句子更完整</span>
-        </template>
-      </van-field>
-      <van-field label="单段上限(s)">
-        <template #input>
-          <van-stepper
-            v-model="form.vadMaxSegmentSec"
-            :min="2"
-            :max="60"
-            :integer="true"
-            :disabled="recording"
-          />
-          <span class="thr-tip">长段强制切；越小越碎，越大分人越稳</span>
-        </template>
-      </van-field>
-      <van-field label="最短声纹段(s)">
-        <template #input>
-          <van-stepper
-            :model-value="form.spkMinSegSec"
-            :min="0"
-            :max="5"
-            :step="0.5"
-            :decimal-length="1"
-            :disabled="recording"
-            @change="(v: number) => (form.spkMinSegSec = v)"
-          />
-          <span class="thr-tip">短于此的句子不做声纹（碎段声纹不稳）</span>
-        </template>
-      </van-field>
-    </div>
 
     <div class="actions">
       <template v-if="!recording">
@@ -229,14 +59,5 @@ function togglePause() {
 .actions { padding: 8px 16px 16px; }
 .rec-row { display: flex; align-items: center; gap: 12px; justify-content: flex-end; }
 .rec-tag { flex: 1; }
-.thr-tip { font-size: 12px; color: #969799; margin-left: 8px; }
 @media (min-width: 768px) { .rec-tag { flex: 0; min-width: 80px; } }
-
-.adv-toggle {
-  display: flex; align-items: center; justify-content: space-between;
-  padding: 8px 16px; font-size: 13px; color: #1989fa; cursor: pointer;
-  border-top: 1px solid #f0f0f0;
-}
-.adv-hint { font-size: 12px; color: #c8c9cc; }
-.adv-panel { padding-bottom: 4px; }
 </style>

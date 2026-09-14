@@ -1,8 +1,13 @@
-"""会议会话：一次会议的完整生命周期编排。
+"""会议会话：一次会议的完整生命周期编排（非实时批次架构）。
 
 数据流：
-    前端音频 → FunASR(online 字幕即时广播 / offline 句子进缓冲)
-    缓冲 ──定时/结束──▶ LLM 滚动总结 ──▶ 广播 + 落库
+    前端音频 → 累积缓冲 ──每 8~15s 一批──▶ GPU /meeting_chunk
+        （VAD 切句 + SeACo Paraformer 转写 + ERes2NetV2 认人）
+        → 带说话人的句子：落库 + 广播 → 批次增强（LLM 纠错 + 滚动纪要）
+    会末：同一端点全场重跑 → 权威终版（utterances_re）
+
+批次切点用 GPU /vad 找最后一个完整句尾，避免把句子从中间切断；
+会末 flush 把尾巴音频（不足一批）也送出去，不丢结尾内容。
 """
 
 from __future__ import annotations
@@ -16,21 +21,14 @@ from datetime import datetime
 from fastapi import WebSocket
 
 from app.config import settings, load_hotwords
-from app.core.asr_client import FunasrClient
-from app.core.roller import RollingEnhancer
+from app.core.enhancer import BatchEnhancer
+from app.core.gpu_pipeline import meeting_chunk, vad_ends
 from app.core.segment import UtteranceBuffer
 from app.db.database import SessionLocal
 from app.db.models import Meeting, Summary, Utterance
 from app.llm import client as llm_client
 
 logger = logging.getLogger(__name__)
-
-
-def _is_punct(ch: str) -> bool:
-    """中英文标点（FunASR timestamp 不含标点，对齐时跳过）。"""
-    import unicodedata
-
-    return unicodedata.category(ch).startswith("P") or ch.isspace()
 
 
 class MeetingSession:
@@ -43,33 +41,20 @@ class MeetingSession:
         self.clients: set[WebSocket] = set()
         self.buffer = UtteranceBuffer()
         self.summary_seq = 0
-        self._asr_closed = asyncio.Event()
         self._stopped = False
         self._lock = asyncio.Lock()
 
-        self.asr = FunasrClient(
-            url=settings.funasr_ws_url,
-            hotwords=load_hotwords(),
-            on_online=self._on_asr_online,
-            on_offline=self._on_asr_offline,
-            on_error=self._on_asr_error,
-            on_closed=self._on_asr_closed,
-        )
-        self.roller = RollingEnhancer(self)
+        self.enhancer = BatchEnhancer(self)
 
         self.paused = False  # 前端暂停：丢弃上行音频（连接保持）
         self.final_title = ""
         self.final_attributes: list[dict] = []  # 累积的事实性属性（key 去重合并）
-        self.spk_threshold: float = settings.spk_threshold  # 说话人聚类阈值，前端可调（默认值唯一来源 config）
-        self.spk_match_threshold: float = settings.spk_match_threshold  # 注册声纹匹配阈值，前端可调
-        self.reannotate_name_threshold: float | None = None  # 会末重标注声纹阈值（None=用 config 默认），前端可调
-        self.speaker_count: int = 0  # 参会人数（前端填写，0=自动估计），会末重标注 oracle
-        # 高级调参（前端配置面板可覆盖；默认取 config.py）
-        self.max_speakers: int = settings.spk_max_speakers          # 实时聚类人数上限（0=不限）
-        self.vad_max_end_silence_ms: int = settings.vad_max_end_silence_ms
-        self.vad_max_segment_sec: int = settings.vad_max_segment_sec
-        self.spk_min_seg_sec: float = settings.spk_min_seg_sec
-        self._audio = bytearray()  # 累计上行 PCM（int16/16kHz/mono），结束时写 wav
+        self._audio = bytearray()      # 累计上行 PCM（int16/16kHz/mono），结束时写 wav
+        self._processed = 0            # 已送出批次的字节偏移
+        self._chunk_failures = 0       # /meeting_chunk 连续失败次数
+        self._batch_loop_task: asyncio.Task | None = None
+        # 热词（FunASR 按空白切分；load_hotwords 逗号格式转空格）
+        self._hotwords = load_hotwords().replace(",", " ")
 
     # ---------- 生命周期 ----------
 
@@ -77,40 +62,32 @@ class MeetingSession:
         async with SessionLocal() as db:
             db.add(Meeting(id=self.meeting_id, title=self.title, recorder=self.recorder))
             await db.commit()
-        await self.asr.start({
-            "spk_threshold": self.spk_threshold,
-            "speaker_match_threshold": self.spk_match_threshold,
-            "vad_max_end_silence_ms": self.vad_max_end_silence_ms,
-            "vad_max_segment_sec": self.vad_max_segment_sec,
-            "spk_min_seg_sec": self.spk_min_seg_sec,
-            "max_speakers": self.max_speakers,
-        })
-        logger.info("meeting %s started", self.meeting_id)
+        self._batch_loop_task = asyncio.create_task(self._batch_loop())
+        logger.info("meeting %s started (nonrealtime batches: min=%ss max=%ss tick=%ss)",
+                    self.meeting_id, settings.pipeline_batch_min_sec,
+                    settings.pipeline_batch_max_sec, settings.pipeline_tick_sec)
 
     async def stop(self) -> None:
-        """结束会议：立刻收尾可落库的部分并广播 ended，重活全部转后台。
+        """结束会议：立刻落库 ended 并广播，重活全部转后台。
 
-        同步段（用户等待的部分）：flush ASR → 等关闭 → 存录音 → 落库 ended + 广播。
-        后台段（_finalize）：等在飞滚动轮次 → 会末总结/标签/属性提取 → 更新会议元信息
-        → 会末重标注。LLM 网关抽风时这些步骤慢，但用户点结束立即看到结束。
+        同步段（用户等待的部分）：存录音 → 落库 ended + 广播。
+        后台段（_finalize）：flush 尾巴批次 → 等在飞增强收尾 → 会末总结/标签/属性
+        → 会末全场重跑（权威终版）。LLM 网关抽风时这些步骤慢，但用户点结束立即看到结束。
         """
         async with self._lock:
             if self._stopped:
                 return
             self._stopped = True
 
-        await self.asr.finish()
-        try:
-            # 重放测试的「停止」是主动放弃：不干等 ASR flush 缓冲（最多 15s），
-            # 已产出的转写保留，未转完的音频丢弃
-            timeout = 2 if self.replay_of else 15
-            await asyncio.wait_for(self._asr_closed.wait(), timeout=timeout)
-        except (TimeoutError, asyncio.TimeoutError):
-            logger.warning("meeting %s: asr close timeout", self.meeting_id)
+        if self._batch_loop_task:
+            self._batch_loop_task.cancel()
+            try:
+                await self._batch_loop_task
+            except asyncio.CancelledError:
+                pass
 
         self._save_recording()
 
-        # 立刻落库 ended + 广播（用户视角：点结束立即结束）
         async with SessionLocal() as db:
             meeting = await db.get(Meeting, self.meeting_id)
             if meeting:
@@ -120,14 +97,16 @@ class MeetingSession:
         await self.broadcast({"type": "ended", "meeting_id": self.meeting_id})
         logger.info("meeting %s ended (finalization continues in background)", self.meeting_id)
 
-        # 重活转后台：等滚动轮次收尾 → 会末总结 → 重标注
         asyncio.create_task(self._finalize())
 
     async def _finalize(self) -> None:
-        """会末收尾（后台）：最终总结/标题/标签/属性 + 重标注。失败仅记日志。"""
+        """会末收尾（后台）：尾巴批次 → 最终总结/标题/标签/属性 + 全场重跑。失败仅记日志。"""
         session_id = self.meeting_id
         try:
-            rolling_summary = await self.roller.finish()
+            # 尾巴音频（不足一批的结尾）也走一批，保证全文完整
+            await self._run_batch(force=True)
+
+            rolling_summary = await self.enhancer.finish()
 
             # 会末总结：优先用滚动纪要（已纠错、信息密度高），全文太长时纪要兜底更稳
             full_text = await self.buffer.full_text()
@@ -191,31 +170,121 @@ class MeetingSession:
         except Exception:
             logger.exception("meeting %s finalize failed", session_id)
 
-        # 会末重标注（阿里 pipeline 切分 + ERes2NetV2 标身份）
+        # 会末全场重跑（与会议中同一 /meeting_chunk 管线）→ utterances_re 权威终版
         from app.core.reannotate import reannotate
 
         pcm = bytes(self._audio)
-        await reannotate(
-            session_id, pcm,
-            speaker_count=self.speaker_count,
-            name_threshold=self.reannotate_name_threshold,
-        )
+        if await reannotate(session_id, pcm):
+            await self.broadcast({"type": "reannotated", "meeting_id": session_id})
+
+    # ---------- 音频上行与批次调度 ----------
 
     async def handle_audio(self, pcm: bytes) -> None:
         if self._stopped or self.paused:
             return
         self._audio.extend(pcm)
-        await self.asr.send_audio(pcm)
 
-    # ---------- 重放测试（音频来自历史录音，按真实节奏走完整实时管线） ----------
+    async def _batch_loop(self) -> None:
+        """定时成批：攒够 pipeline_batch_min_sec 后按 VAD 句尾切点送 /meeting_chunk。"""
+        try:
+            while not self._stopped:
+                await asyncio.sleep(settings.pipeline_tick_sec)
+                if self.paused:
+                    continue
+                await self._run_batch()
+        except asyncio.CancelledError:
+            raise
+
+    async def _run_batch(self, force: bool = False) -> None:
+        """切一批音频送 GPU 管线，句子落库 + 广播 + 驱动增强。
+
+        force=True（会末 flush）：剩余音频全送，不管大小和切点。
+        失败不推进 _processed（下轮重试）；连续失败 3 次丢弃这段防积压。
+        """
+        total = len(self._audio)
+        if total <= self._processed:
+            return
+        pcm = bytes(self._audio[self._processed:])
+        pending_ms = len(pcm) / 32
+
+        if force:
+            cut_ms = pending_ms
+        else:
+            if pending_ms < settings.pipeline_batch_min_sec * 1000:
+                return
+            ends = await vad_ends(pcm)
+            if ends is None:
+                return  # VAD 失败：下轮重试
+            cut_ms = ends[-1] if ends else None
+            if not cut_ms or cut_ms < 1000:
+                if pending_ms < settings.pipeline_batch_max_sec * 1000:
+                    return  # 还没有完整句子且未到强制上限：再等等
+                cut_ms = settings.pipeline_batch_max_sec * 1000  # 长句/长静音：硬切
+            cut_ms = min(cut_ms, pending_ms)
+
+        chunk = pcm[:int(cut_ms * 32)]
+        # shield：stop 取消批次循环时，在飞的 GPU 请求仍跑完（否则 flush 会重复送）
+        segs = await asyncio.shield(meeting_chunk(chunk, self._hotwords))
+        if segs is None:
+            self._chunk_failures += 1
+            if self._chunk_failures >= 3 and not force:
+                logger.warning(
+                    "meeting %s: chunk failed %d times, dropping %.1fs audio",
+                    self.meeting_id, self._chunk_failures, pending_ms / 1000,
+                )
+                self._processed = total
+                self._chunk_failures = 0
+            return
+        self._chunk_failures = 0
+        base_ms = self._processed // 32
+        self._processed += len(chunk)
+        if not segs:
+            return
+
+        seqs: list[int] = []
+        for s in segs:
+            text = (s.get("text") or "").strip()
+            if not text:
+                continue  # 空段不展示（碎段已在 GPU 侧参与打标/修剪）
+            start_ms = int(base_ms + float(s["start"]) * 1000)
+            end_ms = int(base_ms + float(s["end"]) * 1000)
+            item = await self.buffer.add(s.get("speaker") or "", text, start_ms, end_ms)
+            async with SessionLocal() as db:
+                db.add(Utterance(
+                    meeting_id=self.meeting_id,
+                    seq=item.seq,
+                    speaker=item.speaker,
+                    text=item.text,
+                    start_ms=item.start_ms,
+                    end_ms=item.end_ms,
+                    char_timestamps="[]",
+                ))
+                await db.commit()
+            await self.broadcast({
+                "type": "transcript",
+                "seq": item.seq,
+                "speaker": item.speaker,
+                "text": item.text,
+                "start_ms": item.start_ms,
+                "end_ms": item.end_ms,
+            })
+            logger.info(
+                "meeting %s seq=%d spk=%r %d-%dms %s",
+                self.meeting_id, item.seq, item.speaker, item.start_ms, item.end_ms, item.text,
+            )
+            seqs.append(item.seq)
+
+        if seqs:
+            self.enhancer.on_batch(seqs)
+
+    # ---------- 重放测试（音频来自历史录音，按真实节奏喂入） ----------
 
     async def run_replay(self, wav_path: str) -> None:
-        """把历史录音按 0.1s 节奏喂进实时管线，模拟真实开会。
+        """把历史录音按 0.1s 节奏喂进会话，模拟真实开会。
 
         暂停时挂起（不丢节拍，恢复后继续），stop 后立即退出。
         喂完置位 replay_done，由 ws 循环触发正常结束流程。
         """
-        import time
         import wave
 
         CHUNK_SEC = 0.1
@@ -244,67 +313,6 @@ class MeetingSession:
             await self.broadcast({"type": "error", "message": f"录音文件不存在: {wav_path}"})
         finally:
             self.replay_done.set()
-
-    # ---------- ASR 回调 ----------
-
-    async def _on_asr_online(self, text: str) -> None:
-        """流式临时字幕：立即广播，前端标注「识别中」。"""
-        await self.broadcast({"type": "transcript_online", "text": text})
-
-    async def _on_asr_offline(self, text: str, timestamp: list, spk: str | None, char_ts: list) -> None:
-        """句终确定结果：带说话人/时间戳，进缓冲 + 落库 + 广播。"""
-        # FunASR 2pass-offline 返回 spk_name：注册声纹名 / 匿名"说话人1" / "unknown"
-        speaker = "" if not spk or spk == "unknown" else spk
-        start_ms = int(timestamp[0][0]) if timestamp else 0
-        end_ms = int(timestamp[-1][1]) if timestamp else 0
-        # 字级时间戳 [[start_ms, end_ms], ...]：与 text 的非标点字逐一对齐
-        # （FunASR 的 timestamp 不含标点，标点继承前一字区间；ts 耗尽则用末条兜底）
-        chars: list = []
-        if char_ts:
-            prev = [int(char_ts[0][0]), int(char_ts[0][1])] if char_ts else [0, 0]
-            idx = 0
-            for ch in text:
-                if idx < len(char_ts) and not _is_punct(ch):
-                    prev = [int(char_ts[idx][0]), int(char_ts[idx][1])]
-                    idx += 1
-                chars.append([prev[0], prev[1]])
-
-        item = await self.buffer.add(speaker, text, start_ms, end_ms, char_ts=chars)
-
-        async with SessionLocal() as db:
-            db.add(Utterance(
-                meeting_id=self.meeting_id,
-                seq=item.seq,
-                speaker=item.speaker,
-                text=item.text,
-                start_ms=item.start_ms,
-                end_ms=item.end_ms,
-                char_timestamps=json.dumps(chars, ensure_ascii=False),
-            ))
-            await db.commit()
-
-        await self.broadcast({
-            "type": "transcript",
-            "seq": item.seq,
-            "speaker": item.speaker,
-            "text": item.text,
-            "start_ms": item.start_ms,
-            "end_ms": item.end_ms,
-        })
-        logger.info(
-            "meeting %s seq=%d spk=%r %d-%dms %s",
-            self.meeting_id, item.seq, item.speaker, item.start_ms, item.end_ms, item.text,
-        )
-
-        # 滚动增强：句终驱动，攒够窗口后打标+纠错（后台执行不阻塞）
-        if item.start_ms > 0 or item.end_ms > 0:
-            self.roller.on_utterance(item.start_ms, item.end_ms, item.seq)
-
-    async def _on_asr_error(self, msg: str) -> None:
-        await self.broadcast({"type": "error", "message": msg})
-
-    async def _on_asr_closed(self) -> None:
-        self._asr_closed.set()
 
     # ---------- 总结 ----------
 
