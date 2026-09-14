@@ -17,6 +17,7 @@ import numpy as np
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--dir", default="/home/bo1/jvkit/asr/funasr-src/runtime/python/websocket/speaker_enrolls")
+    ap.add_argument("--out", default="", help="导出 xlsx 路径（如 --out eval/xx.xlsx）")
     args = ap.parse_args()
 
     from funasr import AutoModel
@@ -97,6 +98,53 @@ def main() -> None:
     if mm: print(f"  男-男对 ({len(mm)}): median={float(np.median(mm)):.3f}  max={max(mm):.3f}")
     if mf: print(f"  男-女对 ({len(mf)}): median={float(np.median(mf)):.3f}  max={max(mf):.3f}")
     if ff: print(f"  女-女对 ({len(ff)}): median={float(np.median(ff)):.3f}  max={max(ff):.3f}")
+
+    if args.out:
+        from openpyxl import Workbook
+        from openpyxl.styles import Font
+        wb = Workbook()
+        bold = Font(bold=True)
+
+        ws = wb.active
+        ws.title = "每人一览"
+        ws.append(["人名", "区间min", "区间max", "平均", "中位", "最像的人", "最像值"])
+        for c in ws[1]:
+            c.font = bold
+        for a in names:
+            sims_a = sorted(((float(np.dot(centroids[a], centroids[b])), b) for b in names if b != a))
+            vals_a = [s for s, _ in sims_a]
+            top_s, top_b = sims_a[-1]
+            ws.append([a, round(min(vals_a), 3), round(max(vals_a), 3),
+                       round(float(np.mean(vals_a)), 3), round(float(np.median(vals_a)), 3),
+                       top_b, round(top_s, 3)])
+
+        ws2 = wb.create_sheet("两两矩阵")
+        ws2.append([""] + names)
+        for c in ws2[1]:
+            c.font = bold
+        for a in names:
+            ws2.append([a] + [None if a == b else round(float(np.dot(centroids[a], centroids[b])), 3)
+                              for b in names])
+
+        ws3 = wb.create_sheet("分布统计")
+        ws3.append(["指标", "值"])
+        for c in ws3[1]:
+            c.font = bold
+        ws3.append(["两两min", round(min(vals), 3)])
+        ws3.append(["两两median", round(float(np.median(vals)), 3)])
+        ws3.append(["两两max", round(max(vals), 3)])
+        ws3.append(["男-男median", round(float(np.median(mm)), 3) if mm else None])
+        ws3.append(["男-女median", round(float(np.median(mf)), 3) if mf else None])
+        ws3.append(["女-女median", round(float(np.median(ff)), 3) if ff else None])
+        ws3.append([])
+        ws3.append(["最像的5对", "相似度"])
+        for c in ws3[ws3.max_row]:
+            c.font = bold
+        for s, a, b in pairs[:5]:
+            ws3.append([f"{a} ~ {b}", round(s, 3)])
+
+        wb.save(args.out)
+        print(f"[xlsx] saved: {args.out}")
 
 
 if __name__ == "__main__":
