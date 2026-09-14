@@ -87,6 +87,8 @@ async def meeting_ws(ws: WebSocket) -> None:
                     continue
             else:
                 msg = await ws.receive()
+                if msg["type"] == "websocket.disconnect":  # starlette 部分版本不抛异常而是给消息
+                    break
             if msg.get("bytes") is not None:
                 frame = msg["bytes"]
                 if len(frame) > MAX_BINARY_FRAME:

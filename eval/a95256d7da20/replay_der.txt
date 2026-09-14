@@ -1,0 +1,27 @@
+meeting: a95256d7da20
+rttm: eval/aishell4/test/TextGrid/M_R003S01C01.rttm (前 302s)
+GT 语音: 290s | 终版子段: 187
+DER = 53.1%  (miss 43s + FA 2s + conf 109s) / 290s
+最优映射: {'admin': '001-M'}
+GT 说话人: ['001-M', '002-M', '003-F', '004-F', '005-F', '006-F']
+预测标签: ['admin']
+
+每预测标签帧数（映射后判对的/总共）:
+  admin: 13599/24722 帧对 (001-M)
+
+终版前 15 行:
+  [  0s-  0s] admin: 我 也 想
+  [  0s-  1s] admin: 嗯
+  [  4s-  5s] admin: 零 零 幺 一 会 儿 就
+  [  5s-  6s] admin: 另 外 校 长
+  [  7s-  7s] admin: 零 幺 零
+  [  7s-  8s] admin: 老 师
+  [  8s- 10s] admin: 零 幺 幺 教 室
+  [ 10s- 11s] admin: 零 幺 二 除 师
+  [ 11s- 12s] admin: 零 幺 三 保 安
+  [ 12s- 14s] admin: 零 幺 四 张 伤
+  [ 14s- 15s] admin: 啊
+  [ 16s- 20s] admin: 这 次 啊 我 要 把 大 家 伙 儿 都 叫 过 来 咱 们 把 咱 
+  [ 20s- 21s] admin: 这 个 重 新 在
+  [ 22s- 23s] admin: 再 开 一 次 会
+  [ 23s- 25s] admin: 也 毕 竟

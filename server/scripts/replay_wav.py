@@ -66,8 +66,10 @@ def resolve_audio(name: str) -> Path:
 
 async def poll_utterance_count(meeting_id: str) -> int:
     try:
-        d = httpx.get(f"{API_URL}/api/meetings/{meeting_id}", timeout=5).json()
-        return len(d.get("utterances") or [])
+        # 同步 httpx 会阻塞事件循环（影响 ws keepalive），丢线程池执行
+        d = await asyncio.to_thread(
+            httpx.get, f"{API_URL}/api/meetings/{meeting_id}", timeout=5)
+        return len(d.json().get("utterances") or [])
     except Exception:
         return -1
 
@@ -87,7 +89,8 @@ async def main() -> None:
     print(f"音频 {minutes:.1f} 分钟 | 倍速 {args.speed}x | 预计喂入 {minutes / args.speed:.1f} 分钟", flush=True)
     print(f"喂入期间：{FRONTEND} → 历史会议 → 点进本场 → 刷新看批次转写实时增长", flush=True)
 
-    async with websockets.connect(WS_URL, max_size=64 * 1024 * 1024) as ws:
+    async with websockets.connect(WS_URL, max_size=64 * 1024 * 1024,
+                                  ping_interval=None) as ws:  #  keepalive 由服务端负责，客户端不 ping
         await ws.send(json.dumps({
             "type": "start",
             "title": title,
@@ -104,36 +107,71 @@ async def main() -> None:
                 sys.exit(1)
         print(f"STARTED meeting_id={meeting_id}", flush=True)
 
+        # 下行消息必须持续读取（等同浏览器 onmessage）：不读会让协议层积压，
+        # 实测约 60s 后被对端判定超时断开。drain 负责读，看到 ended 置事件。
+        n_pushed = 0
+        ended_event = asyncio.Event()
+
+        async def drain() -> None:
+            nonlocal n_pushed
+            try:
+                async for raw in ws:
+                    try:
+                        m = json.loads(raw)
+                    except Exception:
+                        continue
+                    if m.get("type") == "transcript":
+                        n_pushed += 1
+                    elif m.get("type") == "ended":
+                        ended_event.set()
+                    elif m.get("type") == "error":
+                        print("ERROR:", m.get("message"), flush=True)
+            except Exception:
+                pass
+
+        drain_task = asyncio.create_task(drain())
+
         # 按倍速喂 PCM（与服务端 replay_of 无关，纯客户端上行，等同浏览器开麦）
         fed = 0
         total = len(pcm)
         t0 = time.monotonic()
-        while fed < total:
-            await ws.send(pcm[fed:fed + CHUNK])
-            fed += CHUNK
-            await asyncio.sleep(0.1 / args.speed)
-            if fed % (CHUNK * 600) == 0:  # 每约 1 分钟音频报一次进度
-                el = time.monotonic() - t0
-                n = await poll_utterance_count(meeting_id)
-                print(f"  fed {fed / 32000:.0f}s/{total / 32000:.0f}s "
-                      f"(wall {el:.0f}s) | 已转写 {n} 句", flush=True)
+        try:
+            while fed < total:
+                await ws.send(pcm[fed:fed + CHUNK])
+                fed += CHUNK
+                await asyncio.sleep(0.1 / args.speed)
+                if fed % (CHUNK * 600) == 0:  # 每约 1 分钟音频报一次进度
+                    el = time.monotonic() - t0
+                    n = await poll_utterance_count(meeting_id)
+                    print(f"  fed {fed / 32000:.0f}s/{total / 32000:.0f}s "
+                          f"(wall {el:.0f}s) | 服务端已推送 {n_pushed} 句 / 库内 {n} 句", flush=True)
+        except websockets.ConnectionClosed:
+            fed_sec = fed / 32000
+            print(f"WARN: 连接中断（已喂入 {fed_sec:.0f}s/{total / 32000:.0f}s）"
+                  f"——服务端会按断连收尾，已喂部分照常出结果", flush=True)
+            drain_task.cancel()
+            return  # 服务端已收尾；直接退出（结果已在库里，用 meeting_id 查）
 
         print("喂入完成 → 结束会议，后台 flush/总结/全场重跑中…", flush=True)
-        await ws.send(json.dumps({"type": "stop"}))
-        while True:  # 等 ended（服务端立刻广播，重活转后台）
-            msg = json.loads(await ws.recv())
-            if msg.get("type") == "ended":
-                break
-            if msg.get("type") == "error":
-                print("ERROR:", msg.get("message"), flush=True)
-                sys.exit(1)
+        try:
+            await ws.send(json.dumps({"type": "stop"}))
+            try:
+                await asyncio.wait_for(ended_event.wait(), timeout=60)
+            except asyncio.TimeoutError:
+                print("WARN: 等 ended 超时（服务端可能已收尾）", flush=True)
+        except websockets.ConnectionClosed:
+            pass  # ended 前断连也无妨：服务端已收尾
+        drain_task.cancel()
+        print(f"会议结束：服务端累计推送 {n_pushed} 句转写", flush=True)
 
-    # 轮询会末终版（长会议全场重跑要几分钟）
+    # 轮询会末终版（长会议全场重跑要几分钟）；同步请求丢线程池，不阻塞事件循环
     deadline = time.monotonic() + args.wait_min * 60
     detail: dict = {}
     while time.monotonic() < deadline:
         try:
-            detail = httpx.get(f"{API_URL}/api/meetings/{meeting_id}", timeout=5).json()
+            resp = await asyncio.to_thread(
+                httpx.get, f"{API_URL}/api/meetings/{meeting_id}", timeout=5)
+            detail = resp.json()
             if detail.get("reannotated"):
                 break
         except Exception:
