@@ -42,6 +42,34 @@ def load_rttm(path: Path, max_sec: float | None) -> list[tuple[str, int, int]]:
     return out
 
 
+def load_canonical(rttm: Path) -> tuple[dict[str, str], dict[str, list[str]]]:
+    """AISHELL-4 同人别名合并（2026-09-15 用户确认：编号前缀=同一个人，
+    同一人可在不同会议注册不同别名，如 001-M == 001-今天把大、
+    010-老师 == 002-M）。
+
+    预测名先经 enroll_map（eval/<rttm_stem>/enroll_map.json）逆映射回 rttm id，
+    再取前导数字为 canonical id；GT 直接取前导数字。
+    返回 (canonical 函数, 合并明细)。"""
+    import re
+
+    name_to_rttm: dict[str, str] = {}
+    mpath = ROOT / "eval" / rttm.stem / "enroll_map.json"
+    if mpath.exists():
+        m = json.loads(mpath.read_text(encoding="utf-8"))
+        name_to_rttm = {v: k for k, v in m.get("rttm_to_name", {}).items()}
+
+    merged: dict[str, set[str]] = {}
+
+    def canon(x: str) -> str:
+        rid = name_to_rttm.get(x, x)
+        mm = re.match(r"(\d+)", rid)
+        cid = mm.group(1) if mm else rid
+        merged.setdefault(cid, set()).add(x)
+        return cid
+
+    return canon, {k: sorted(v) for k, v in merged.items()}
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("meeting_id")
@@ -59,6 +87,7 @@ def main() -> None:
     meeting_ms = max(e for _, _, e, _ in segs)
 
     gt = load_rttm(Path(args.rttm), args.max_sec)
+    canon, merged = load_canonical(Path(args.rttm))
     total_ms = min(meeting_ms, int(args.max_sec * 1000)) if args.max_sec else meeting_ms
     n = total_ms // FRAME_MS
 
@@ -66,13 +95,13 @@ def main() -> None:
     gt_frames = [None] * n
     for spk, s, e in gt:
         for i in range(max(0, s // FRAME_MS), min(n, (e + FRAME_MS - 1) // FRAME_MS)):
-            gt_frames[i] = spk
+            gt_frames[i] = canon(spk)
 
-    # 预测帧：子段说话人
+    # 预测帧：子段说话人（同一人多别名先合并再计混淆）
     pred_frames = [None] * n
     for spk, s, e, _ in segs:
         for i in range(max(0, s // FRAME_MS), min(n, (e + FRAME_MS - 1) // FRAME_MS)):
-            pred_frames[i] = spk or None
+            pred_frames[i] = canon(spk) if spk else None
 
     gt_spks = sorted({s for s in gt_frames if s})
     pred_labels = sorted({s for s in pred_frames if s})
@@ -109,6 +138,7 @@ def main() -> None:
         f"GT 语音: {gt_total*FRAME_MS/1000:.0f}s | 终版子段: {len(segs)}",
         f"DER = {der*100:.1f}%  (miss {miss_frames*FRAME_MS/1000:.0f}s + FA {fa_frames*FRAME_MS/1000:.0f}s + conf {conf_frames*FRAME_MS/1000:.0f}s) / {gt_total*FRAME_MS/1000:.0f}s",
         f"最优映射: {mapping}",
+        f"别名合并: {merged}",
         f"GT 说话人: {gt_spks}",
         f"预测标签: {pred_labels}",
         "",

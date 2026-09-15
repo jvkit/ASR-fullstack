@@ -23,8 +23,12 @@ class Settings(BaseSettings):
     pipeline_vad_max_end_silence_ms: int = 250  # 与 GPU /vad 默认一致
 
     # 说话人认人阈值（会议中批次 + 会末重标注 + 手动重标注共用此一个旋钮；
-    # 注册人真实匹配分落在 0.44~0.61，0.30 与 /diarize_sent 端点默认一致）
-    reannotate_name_threshold: float = 0.30
+    # 注册人真实匹配分落在 0.44~0.61。2026-09-15 由 0.30 收紧到 0.40：
+    # 实测同事说话误匹配 0.389、咳嗽误匹配 0.5+（均贴到冯忠俊——其合并质心
+    # 混有远场弱质录音，过于普适，重录后有望再收）。DER 验证（AISHELL M会
+    # 5min，replay_der 别名合并口径）：0.30→16.8% / 0.40→17.8%，混淆 4s→7s，
+    # miss 不变 43s——收紧的代价在噪声内）
+    reannotate_name_threshold: float = 0.40
     reannotate_min_sec: int = 10          # 短于此秒数不做重标注
 
     # LLM（内网 vLLM / mymodule 网关）

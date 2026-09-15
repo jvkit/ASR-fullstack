@@ -310,7 +310,7 @@ async function remove(name: string) {
       />
       <van-field label="说明">
         <template #input>
-          <span class="tip">对着开会用的同一台设备，自然说 20~60 秒（可以停顿、想词）。系统自动挑出最清晰、最像你的 3~5 个片段完成注册；太短/太轻/疑似他人或环境声的片段会被丢弃</span>
+          <span class="tip">对着开会用的同一台设备，自然说 20~60 秒（可以停顿、想词）。系统自动挑出最清晰、最像你的 3~5 个片段；太短/太轻/疑似他人或环境声的片段会被丢弃。没录够可以同名再录，合格片段自动累积</span>
         </template>
       </van-field>
       <div class="rec-actions">
