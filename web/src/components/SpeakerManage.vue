@@ -135,7 +135,9 @@ async function stopAndEnroll() {
       return
     }
     speakers.value = d.speakers || (await (await fetch('/api/speakers')).json()).speakers || []
-    okMsg.value = `已注册「${name}」：有效语音 ${d.effective_sec}s / ${d.segments} 段`
+    okMsg.value = d.msg
+      ? `「${name}」${d.msg}`
+      : `已注册「${name}」：有效语音 ${d.effective_sec}s / ${d.segments} 段`
     form.name = ''
   } catch (e) {
     errorMsg.value = `注册失败：${e}`
@@ -211,6 +213,12 @@ async function idStop() {
     idBusy.value = false
     idChunks = []
   }
+}
+
+async function appendStart(name: string) {
+  // 补录：填好名字直接开始录音（后端同名自动走联合重选）
+  form.name = name
+  await startRecord()
 }
 
 // ---------- 删除 ----------
@@ -308,6 +316,11 @@ async function remove(name: string) {
         placeholder="如：张三"
         :disabled="recording"
       />
+      <van-field v-if="form.name.trim() && speakers.includes(form.name.trim())" label=" ">
+        <template #input>
+          <span class="tip append-tip">「{{ form.name.trim() }}」已在库中：本次录入将与既有声纹<b>联合重选（补录）</b>——新旧片段同台竞争，合格的留下重建质心</span>
+        </template>
+      </van-field>
       <van-field label="说明">
         <template #input>
           <span class="tip">对着开会用的同一台设备，自然说 20~60 秒（可以停顿、想词）。系统自动挑出最清晰、最像你的 3~5 个片段；太短/太轻/疑似他人或环境声的片段会被丢弃。没录够可以同名再录，合格片段自动累积</span>
@@ -348,7 +361,10 @@ async function remove(name: string) {
       <van-empty v-if="!speakers.length" description="暂无注册声纹" />
       <van-cell v-for="s in speakers" :key="s" :title="s">
         <template #right-icon>
-          <van-button size="small" type="danger" plain @click="remove(s)">删除</van-button>
+          <div class="row-btns">
+            <van-button size="small" type="primary" plain @click="appendStart(s)">补录</van-button>
+            <van-button size="small" type="danger" plain @click="remove(s)">删除</van-button>
+          </div>
         </template>
       </van-cell>
     </van-cell-group>
@@ -365,6 +381,7 @@ async function remove(name: string) {
 .meter { height: 10px; background: #ebedf0; border-radius: 5px; overflow: hidden; }
 .meter-fill { height: 100%; background: linear-gradient(90deg, #07c160, #f0a020); transition: width 0.1s; }
 .meter-warn { display: block; margin-top: 6px; font-size: 12px; color: #ee0a24; }
+.append-tip { color: #1989fa; }
 .report { padding: 8px 16px 14px; font-size: 13px; }
 .rep-ok { color: #0a7a4b; font-weight: 600; }
 .rep-warn { color: #ed6a0c; font-weight: 600; }
@@ -377,4 +394,5 @@ async function remove(name: string) {
 .rank-bar { flex: 1; height: 8px; background: #ebedf0; border-radius: 4px; overflow: hidden; }
 .rank-fill { height: 100%; background: #1989fa; }
 .rank-sim { width: 44px; text-align: right; color: #646566; font-variant-numeric: tabular-nums; }
+.row-btns { display: flex; gap: 8px; }
 </style>

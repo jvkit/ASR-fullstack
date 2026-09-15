@@ -32,12 +32,15 @@ async def reannotate(
     pcm: bytes,
     name_threshold: float | None = None,
     timeout_sec: float = 600,
+    anon_clusters: list | None = None,
+    anon_next: int = 1,
 ) -> bool:
     """会末重标注主入口（session.stop 里 asyncio.create_task 调用）。失败仅记日志。
 
     name_threshold: 声纹匹配阈值（None=用 config 默认 reannotate_name_threshold，
     与会议中批次共用一个旋钮）。
     timeout_sec: 全场重跑超时（长会议单块处理分钟级，默认 600s 远大于批次的 120s）。
+    anon_clusters/anon_next: 会议中累积的匿名簇状态（陌生人N 全场重跑时保持一致）。
     返回是否产出终版（太短/失败返回 False）。
     """
     try:
@@ -48,10 +51,12 @@ async def reannotate(
         thr = name_threshold if name_threshold and 0 < name_threshold < 1 \
             else settings.reannotate_name_threshold
         hotwords = load_hotwords().replace(",", " ")
-        segs = await meeting_chunk(pcm, hotwords, timeout_sec=timeout_sec)
-        if segs is None:
+        res = await meeting_chunk(pcm, hotwords, timeout_sec=timeout_sec,
+                                  anon_clusters=anon_clusters, anon_next=anon_next)
+        if res is None:
             logger.error("reannotate %s: meeting_chunk failed", meeting_id)
             return False
+        segs, _anon = res
         logger.info("reannotate %s: %d segs", meeting_id, len(segs))
 
         async with SessionLocal() as db:

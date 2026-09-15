@@ -57,6 +57,25 @@ class MeetingSession:
         self._batch_loop_task: asyncio.Task | None = None
         # 热词（FunASR 按空白切分；load_hotwords 逗号格式转空格）
         self._hotwords = load_hotwords().replace(",", " ")
+        # 匿名簇会话状态（陌生人N 跨批次稳定）：GPU 每批回传更新，下批回传
+        self.anon_clusters: list[dict] = []
+        self.anon_next = 1
+
+    def _merge_anon(self, anon: list[dict]) -> None:
+        """合并 GPU 回传的匿名簇更新（按 id upsert），推进编号计数。"""
+        import re
+        if not anon:
+            return
+        idx = {c["id"]: c for c in self.anon_clusters}
+        for c in anon:
+            if c["id"] in idx:
+                idx[c["id"]].update(c)
+            else:
+                self.anon_clusters.append(c)
+        nums = [int(m.group(1)) for c in self.anon_clusters
+                for m in [re.match(r"陌生人(\d+)", c["id"])] if m]
+        if nums:
+            self.anon_next = max(nums) + 1
 
     # ---------- 生命周期 ----------
 
@@ -181,7 +200,9 @@ class MeetingSession:
         from app.core.reannotate import reannotate
 
         pcm = bytes(self._audio)
-        if await reannotate(session_id, pcm):
+        if await reannotate(session_id, pcm,
+                            anon_clusters=self.anon_clusters,
+                            anon_next=self.anon_next):
             await self.broadcast({"type": "reannotated", "meeting_id": session_id})
 
     # ---------- 音频上行与批次调度 ----------
@@ -234,8 +255,11 @@ class MeetingSession:
 
         chunk = pcm[:int(cut_ms * 32)]
         # shield：stop 取消批次循环时，在飞的 GPU 请求仍跑完（否则 flush 会重复送）
-        segs = await asyncio.shield(meeting_chunk(chunk, self._hotwords))
-        if segs is None:
+        res = await asyncio.shield(meeting_chunk(
+            chunk, self._hotwords,
+            anon_clusters=self.anon_clusters, anon_next=self.anon_next,
+        ))
+        if res is None:
             self._chunk_failures += 1
             if self._chunk_failures >= 3 and not force:
                 logger.warning(
@@ -245,6 +269,8 @@ class MeetingSession:
                 self._processed = total
                 self._chunk_failures = 0
             return
+        segs, anon = res
+        self._merge_anon(anon)
         self._chunk_failures = 0
         base_ms = self._processed // 32
         self._processed += len(chunk)

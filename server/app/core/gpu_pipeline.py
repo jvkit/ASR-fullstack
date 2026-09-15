@@ -45,16 +45,20 @@ async def vad_ends(pcm: bytes) -> list[float] | None:
         return None
 
 
-async def meeting_chunk(pcm: bytes, hotwords: str = "", timeout_sec: float | None = None) -> list[dict] | None:
-    """一体化管线：音频 -> 带说话人的子段列表（时间相对本块音频，秒）。
+async def meeting_chunk(pcm: bytes, hotwords: str = "", timeout_sec: float | None = None,
+                        anon_clusters: list | None = None, anon_next: int = 1) -> tuple | None:
+    """一体化管线：音频 -> (带说话人的子段列表, 匿名簇更新)。
 
-    返回 [{start, end, speaker, text}]；失败返回 None。
+    返回 (segs, anon)；segs=[{start, end, speaker, text}]，anon=[{id, emb, secs}]
+    为本次更新/新增的匿名簇（调用方持久化后随下批回传）；失败返回 None。
     timeout_sec: 覆盖默认 pipeline_chunk_timeout_sec（会末全场重跑传大值）。
     """
     try:
         data: dict = {
             "name_threshold": str(settings.reannotate_name_threshold),
             "max_end_silence_ms": str(settings.pipeline_vad_max_end_silence_ms),
+            "anon_clusters": json.dumps(anon_clusters or []),
+            "anon_next": str(anon_next),
         }
         if hotwords:
             data["hotwords"] = hotwords
@@ -65,7 +69,8 @@ async def meeting_chunk(pcm: bytes, hotwords: str = "", timeout_sec: float | Non
                 data=data,
             )
             r.raise_for_status()
-            return r.json().get("segs", [])
+            j = r.json()
+            return j.get("segs", []), j.get("anon", [])
     except Exception:
         logger.exception("meeting_chunk failed")
         return None
