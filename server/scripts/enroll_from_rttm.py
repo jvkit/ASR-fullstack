@@ -105,9 +105,10 @@ def main() -> None:
     ap.add_argument("wav")
     ap.add_argument("rttm")
     ap.add_argument("--intro-sec", type=float, default=60.0, help="开场自我介绍时长上限（0=不解析，直接用 rttm id）")
-    ap.add_argument("--min-len", type=float, default=3.0)
+    ap.add_argument("--min-len", type=float, default=2.0)
     ap.add_argument("--max-len", type=float, default=6.0)
     ap.add_argument("--skip-after", type=float, default=2.0, help="跳过开场 N 秒内的段（开场常有点名/杂音）")
+    ap.add_argument("--max-segs", type=int, default=5, help="每人拼接的注册段数上限（智能注册多段质心）")
     args = ap.parse_args()
 
     rttm_path = Path(args.rttm)
@@ -128,32 +129,32 @@ def main() -> None:
                     if ov > (g["end"] - g["start"]) * 0.5:
                         intro_texts[spk].append(g.get("text", ""))
 
-    # 2) 每人定名字 + 抽注册段
+    # 2) 每人定名字 + 抽注册段（智能注册：多段拼接，服务端 VAD 重切+质心选优）
     names: dict[str, str] = {}
     ok, fail = 0, []
+    SIL = b"\x00\x00" * 16000  # 1s 静音分隔（防拼接处 VAD 粘段）
     for spk in sorted(segs):
         name = parse_intro_name(intro_texts[spk]) or spk.replace("_", "-")
         names[spk] = name
         cands = sorted(
-            ((s, d) for s, d in segs[spk] if s >= args.skip_after),
+            ((s, d) for s, d in segs[spk] if s >= args.skip_after and d >= args.min_len),
             key=lambda x: -x[1],
-        )
-        clip = None
-        for s, d in cands:
-            clip = pick_clip(args.wav, s, d, args.min_len, args.max_len)
-            if clip:
-                break
-        if not clip:
+        )[: args.max_segs]
+        parts = [c for c in (pick_clip(args.wav, s, d, args.min_len, args.max_len) for s, d in cands) if c]
+        if len(parts) < 3:
             fail.append(name)
-            print(f"  {spk} -> {name}: 无 ≥{args.min_len}s 的可用段，跳过", flush=True)
+            print(f"  {spk} -> {name}: 可用段不足 3 段（{len(parts)}），跳过", flush=True)
             continue
-        r = httpx.post(f"{API}/api/speakers/enroll", params={"name": name}, content=clip, timeout=60)
-        if r.status_code == 200 and r.json().get("ok"):
+        clip = SIL.join(parts)
+        r = httpx.post(f"{API}/api/speakers/enroll", params={"name": name}, content=clip, timeout=180)
+        rep = r.json() if r.headers.get("content-type", "").startswith("application/json") else {}
+        if r.status_code == 200 and rep.get("ok"):
             ok += 1
-            print(f"  {spk} -> {name}: 已注册（{len(clip) / 32000:.1f}s 中段）", flush=True)
+            print(f"  {spk} -> {name}: 已注册（有效 {rep.get('effective_sec')}s / {rep.get('segments')} 段，"
+                  f"丢弃 {len(rep.get('rejected', []))} 段）", flush=True)
         else:
             fail.append(name)
-            print(f"  {spk} -> {name}: 注册失败 {r.status_code} {r.text[:120]}", flush=True)
+            print(f"  {spk} -> {name}: 注册失败 {r.status_code} {rep.get('error') or r.text[:120]}", flush=True)
 
     # 3) 映射表落盘（DER 评分/排查用）
     out = Path("eval") / rttm_path.stem / "enroll_map.json"

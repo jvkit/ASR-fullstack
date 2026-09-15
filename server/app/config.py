@@ -12,11 +12,9 @@ ENV_FILE = PROJECT_ROOT / ".env"
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=ENV_FILE, env_file_encoding="utf-8", extra="ignore")
 
-    # GPU 非实时一体化管线（VAD 切句 + SeACo Paraformer 转写 + ERes2NetV2 认人）
+    # GPU 非实时一体化管线 + 声纹库管理（VAD 切句 + SeACo Paraformer 转写 +
+    # ERes2NetV2 认人；声纹注册/列表/删除/检测全部走这里，唯一权威库）
     diarize_http_url: str = "http://192.168.30.87:10096"
-    # 声纹注册管理（enroll/list/delete）仍走 GPU FunASR websocket 服务的控制通道；
-    # 转写已不走它（非实时管线全走 diarize_http_url）
-    funasr_ws_url: str = "wss://192.168.30.87:10095"
     pipeline_tick_sec: float = 4.0          # 批次调度检查间隔
     pipeline_batch_min_sec: float = 8.0     # 攒够这么多音频才尝试成批（VAD 句尾切点）
     pipeline_batch_max_sec: float = 15.0    # 超过强制硬切（防长句/长静音拖死批次）
@@ -44,6 +42,16 @@ class Settings(BaseSettings):
     langfuse_host: str = "http://localhost:3000"
     langfuse_public_key: str = ""
     langfuse_secret_key: str = ""
+
+    # 声纹智能注册（GPU /speaker_enroll；标定依据见 docs/声纹录入质量设计.md）
+    enroll_min_total_sec: float = 5.0      # 录音总时长硬下限（更早拦截误触）
+    enroll_min_seg_sec: float = 2.0        # 单段合格下限（短段是相似度拖尾主因）
+    enroll_min_segments: int = 3           # 合格段数下限（1→3 段质心收益最大）
+    enroll_min_effective_sec: float = 10.0 # 有效语音总时长下限（文献 30s 饱和，闭集认人 10s 起）
+    enroll_max_keep: int = 5               # 多段质心保留段数（5 段后收益饱和）
+    enroll_consistency: float = 0.50       # 段间一致性阈值（会话内标定：女女跨人中位 0.419）
+    enroll_timeout_sec: float = 180.0      # 注册处理超时（VAD+多段 embedding）
+    identify_match_threshold: float = 0.40 # 录入检测"确认命中"线（>=此值且领先即匹配本人）
 
     # 服务
     server_host: str = "0.0.0.0"
