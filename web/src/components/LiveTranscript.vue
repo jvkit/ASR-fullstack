@@ -28,7 +28,7 @@ watch(
 <template>
   <van-cell-group inset class="panel">
     <template #title>
-      <span>实时转写</span>
+      <span>转写记录</span>
       <van-tag
         v-for="spk in speakers"
         :key="spk"
@@ -50,8 +50,7 @@ watch(
         >
           {{ u.speaker }}
         </van-tag>
-        <span class="utt-text" :class="{ draft: u.draft }">{{ u.text }}</span>
-        <van-tag v-if="u.draft" size="mini" plain type="default" class="draft-tag">识别中</van-tag>
+        <span class="utt-text">{{ u.text }}</span>
       </div>
       <van-empty v-if="!utterances.length" description="开始说话后将按批次显示转写（约 8 秒一批）" />
     </div>
@@ -63,8 +62,6 @@ watch(
 .list { height: 40vh; overflow-y: auto; padding: 8px 16px; }
 .utt { margin-bottom: 10px; display: flex; align-items: baseline; gap: 8px; }
 .utt-text { flex: 1; word-break: break-word; }
-.utt-text.draft { color: #999; font-style: italic; }
-.draft-tag { flex-shrink: 0; color: #bbb; }
 .spk-tag { flex-shrink: 0; }
 @media (min-width: 768px) { .list { height: 60vh; } }
 </style>

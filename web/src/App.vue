@@ -243,7 +243,7 @@ onMounted(() => {
 <template>
   <div class="app-shell">
     <!-- 桌面端：顶部导航；移动端：顶部仅标题，导航在底部 tabbar -->
-    <van-nav-bar :title="view === 'detail' ? '会议详情' : '会议实时纪要'" />
+    <van-nav-bar :title="view === 'detail' ? '会议详情' : '会议纪要'" />
 
     <van-notice-bar
       v-if="insecure"
@@ -287,7 +287,7 @@ onMounted(() => {
         </div>
       </template>
 
-      <!-- 实时记录视图 -->
+      <!-- 会议记录视图（批次转写） -->
       <template v-else-if="view === 'live'">
         <Recorder :recording="recording" :paused="paused" :insecure="insecure" @start="onStart" @pause="onPause" @resume="onResume" @stop="onStop" />
 
@@ -330,7 +330,7 @@ onMounted(() => {
 
     <!-- 移动端底部导航（桌面端隐藏，桌面用顶部 radio-group） -->
     <van-tabbar v-model="view" class="mobile-tabbar">
-      <van-tabbar-item name="live" icon="edit">实时记录</van-tabbar-item>
+      <van-tabbar-item name="live" icon="edit">会议记录</van-tabbar-item>
       <van-tabbar-item name="speakers" icon="contact">声纹管理</van-tabbar-item>
       <van-tabbar-item name="list" icon="records" :badge="meetingCount || ''">历史会议</van-tabbar-item>
     </van-tabbar>
