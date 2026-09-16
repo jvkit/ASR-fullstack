@@ -50,6 +50,7 @@ def load_canonical(rttm: Path) -> tuple[dict[str, str], dict[str, list[str]]]:
     预测名先经 enroll_map（eval/<rttm_stem>/enroll_map.json）逆映射回 rttm id，
     再取前导数字为 canonical id；GT 直接取前导数字。
     返回 (canonical 函数, 合并明细)。"""
+    import json
     import re
 
     name_to_rttm: dict[str, str] = {}
