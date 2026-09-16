@@ -21,6 +21,24 @@ class Settings(BaseSettings):
     pipeline_chunk_timeout_sec: float = 120  # /meeting_chunk 超时（实测 30s 音频约 17s）
     pipeline_vad_timeout_sec: float = 30    # 批次切点 VAD 超时
     pipeline_vad_max_end_silence_ms: int = 250  # 与 GPU /vad 默认一致
+    # 匿名聚类簇内切簇落差（split_gap）：同人段间相似度自然分布宽度 0.15+，
+    # 注册场景的 0.12 会把聚好的簇拆成单段簇（盲测 6 真人出 30 陌生人）。
+    # 0.35 起激进调参验证中（2026-09-16）
+    anon_split_gap: float = 0.20
+    # 匿名聚类入簇地板（anon_threshold）：段对簇质心相似度 ≥ 此值才入簇。
+    # 同人段间 p10=0.66、跨人 max=0.58（女女），0.45 留有 0.07 余量；
+    # 降到 0.40 收碎段（激进调参验证中，2026-09-16）
+    anon_cluster_threshold: float = 0.35
+    # 匿名簇两次确认制：候选攒满 confirm_count 段才升级发号（防 0.5s 语气词自立簇心；
+    # 2026-09-16 设计，日志 [anon] 可审计每个段的去向）
+    anon_confirm_count: int = 2
+    # 会末尾音归属：孤段先对成熟簇重比（>=anon_cluster_threshold 吸收），
+    # 仍孤则对时间前后相邻两簇比相似度，贴像的一边；两边都 < tail_min_sim 不贴。
+    # 只处理孤段候选，只作用于会末终版
+    anon_tail_attach: bool = True
+    anon_tail_min_sim: float = 0.25
+    # 显示层：簇总时长 < 此值不显示陌生人编号，统一"未识别短语音"（身份数据不受影响）
+    anon_display_min_sec: float = 3.0
 
     # 说话人认人阈值（会议中批次 + 会末重标注 + 手动重标注共用此一个旋钮；
     # 注册人真实匹配分落在 0.44~0.61。2026-09-15 由 0.30 收紧到 0.40：

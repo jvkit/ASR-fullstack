@@ -46,12 +46,15 @@ async def vad_ends(pcm: bytes) -> list[float] | None:
 
 
 async def meeting_chunk(pcm: bytes, hotwords: str = "", timeout_sec: float | None = None,
-                        anon_clusters: list | None = None, anon_next: int = 1) -> tuple | None:
+                        anon_clusters: list | None = None, anon_next: int = 1,
+                        final: bool = False) -> tuple | None:
     """一体化管线：音频 -> (带说话人的子段列表, 匿名簇更新)。
 
     返回 (segs, anon)；segs=[{start, end, speaker, text}]，anon=[{id, emb, secs}]
     为本次更新/新增的匿名簇（调用方持久化后随下批回传）；失败返回 None。
     timeout_sec: 覆盖默认 pipeline_chunk_timeout_sec（会末全场重跑传大值）。
+    final: True=会末终版（兜底发号+尾音归属+显示降级）；False=会中批次
+    （未确认候选回传为 cand 条目，段标"待定"）。
     """
     try:
         data: dict = {
@@ -59,6 +62,13 @@ async def meeting_chunk(pcm: bytes, hotwords: str = "", timeout_sec: float | Non
             "max_end_silence_ms": str(settings.pipeline_vad_max_end_silence_ms),
             "anon_clusters": json.dumps(anon_clusters or []),
             "anon_next": str(anon_next),
+            "split_gap": str(settings.anon_split_gap),
+            "anon_threshold": str(settings.anon_cluster_threshold),
+            "confirm_count": str(settings.anon_confirm_count),
+            "tail_attach": "true" if settings.anon_tail_attach else "false",
+            "tail_min_sim": str(settings.anon_tail_min_sim),
+            "display_min_sec": str(settings.anon_display_min_sec),
+            "final": "true" if final else "false",
         }
         if hotwords:
             data["hotwords"] = hotwords

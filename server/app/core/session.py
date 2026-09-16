@@ -62,17 +62,15 @@ class MeetingSession:
         self.anon_next = 1
 
     def _merge_anon(self, anon: list[dict]) -> None:
-        """合并 GPU 回传的匿名簇更新（按 id upsert），推进编号计数。"""
+        """整体替换匿名状态（GPU 每批回传全量快照：正式簇+候选；升级/贴附消失的不带回）。
+
+        2026-09-16 改：旧版按 id upsert，候选升级/尾音贴附后旧条目永不删除会幽灵复活。
+        """
         import re
         if not anon:
             return
-        idx = {c["id"]: c for c in self.anon_clusters}
-        for c in anon:
-            if c["id"] in idx:
-                idx[c["id"]].update(c)
-            else:
-                self.anon_clusters.append(c)
-        nums = [int(m.group(1)) for c in self.anon_clusters
+        self.anon_clusters = anon
+        nums = [int(m.group(1)) for c in anon
                 for m in [re.match(r"陌生人(\d+)", c["id"])] if m]
         if nums:
             self.anon_next = max(nums) + 1

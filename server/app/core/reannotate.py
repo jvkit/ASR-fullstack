@@ -52,7 +52,8 @@ async def reannotate(
             else settings.reannotate_name_threshold
         hotwords = load_hotwords().replace(",", " ")
         res = await meeting_chunk(pcm, hotwords, timeout_sec=timeout_sec,
-                                  anon_clusters=anon_clusters, anon_next=anon_next)
+                                  anon_clusters=anon_clusters, anon_next=anon_next,
+                                  final=True)
         if res is None:
             logger.error("reannotate %s: meeting_chunk failed", meeting_id)
             return False
