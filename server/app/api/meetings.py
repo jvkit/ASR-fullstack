@@ -3,6 +3,7 @@
 import json
 from pathlib import Path
 
+import numpy as np
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse
 from sqlalchemy import select
@@ -138,8 +139,8 @@ async def meeting_audio_denoised(meeting_id: str) -> FileResponse:
         data, _sr = sf.read(str(src), dtype="int16")
         out = denoise_pcm(data.tobytes())
         cache_dir.mkdir(exist_ok=True)
-        with open(cache, "wb") as f:
-            f.write(out)
+        # 必须写标准 WAV 容器（裸 PCM 浏览器无法解码）
+        sf.write(str(cache), np.frombuffer(out, dtype=np.int16), 16000, subtype="PCM_16")
 
     if not cache.is_file():
         await run_in_threadpool(_build)
