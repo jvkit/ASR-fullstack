@@ -39,6 +39,9 @@ class Settings(BaseSettings):
     anon_tail_min_sim: float = 0.25
     # 显示层：簇总时长 < 此值不显示陌生人编号，统一"未识别短语音"（身份数据不受影响）
     anon_display_min_sec: float = 3.0
+    # ASR 后处理：CT-Transformer 标点模型 + WeTextProcessing ITN（百分之五十->50%）
+    pipeline_punc_enabled: bool = True
+    pipeline_itn_enabled: bool = True
 
     # 说话人认人阈值（会议中批次 + 会末重标注 + 手动重标注共用此一个旋钮；
     # 注册人真实匹配分落在 0.44~0.61。2026-09-15 由 0.30 收紧到 0.40：

@@ -69,6 +69,8 @@ async def meeting_chunk(pcm: bytes, hotwords: str = "", timeout_sec: float | Non
             "tail_min_sim": str(settings.anon_tail_min_sim),
             "display_min_sec": str(settings.anon_display_min_sec),
             "final": "true" if final else "false",
+            "punc": "true" if settings.pipeline_punc_enabled else "false",
+            "itn": "true" if settings.pipeline_itn_enabled else "false",
         }
         if hotwords:
             data["hotwords"] = hotwords
