@@ -42,6 +42,8 @@ class Settings(BaseSettings):
     # ASR 后处理：CT-Transformer 标点模型 + WeTextProcessing ITN（百分之五十->50%）
     pipeline_punc_enabled: bool = True
     pipeline_itn_enabled: bool = True
+    # SeACo 热词偏置强度 λ（2026-09-17 矩阵定档：5000词@λ0.1 质量零代价，λ1.0 满格会帮倒忙）
+    pipeline_hw_weight: float = 0.1
 
     # 说话人认人阈值（会议中批次 + 会末重标注 + 手动重标注共用此一个旋钮；
     # 注册人真实匹配分落在 0.44~0.61。2026-09-15 由 0.30 收紧到 0.40：
@@ -88,7 +90,7 @@ class Settings(BaseSettings):
     final_tags_count: int = 5             # 会末生成的标签数量上限
 
     # 热词
-    hotwords_file: str = "./hotwords.txt"  # 大词库文件（每行一词，空行/#注释忽略）
+    hotwords_file: str = "./hotwords/dict_daily5k.txt"  # 大词库文件（每行一词，空行/#注释忽略）
     hotwords_extra: str = ""               # 额外热词（逗号分隔），公司人名/项目名
 
 
