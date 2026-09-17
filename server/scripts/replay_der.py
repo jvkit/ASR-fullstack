@@ -119,15 +119,36 @@ def main() -> None:
             fa_frames += 1
     gt_total = sum(1 for g in gt_frames if g)
 
-    best = None
-    k = min(len(pred_labels), len(gt_spks))
-    for chosen in itertools.permutations(gt_spks, k):
-        mapping = dict(zip(pred_labels, chosen))
-        correct = sum(c for (p, g), c in conf.items() if mapping.get(p) == g)
-        err = gt_total - correct
-        if best is None or err < best[0]:
-            best = (err, mapping)
-    err, mapping = best
+    # 最优映射：pred_label × gt_spk 的判对帧矩阵上做最大权匹配（Hungarian），
+    # 每个 GT 最多映射一个 pred，多余 pred 保持未映射。修过 bug：旧版
+    # permutations(gt_spks, k) 只会映射字典序前 k 个 pred 标签，
+    # 陌生人数量 > GT 时（盲测常态）大簇永远轮不到映射，DER 虚高。
+    try:
+        from scipy.optimize import linear_sum_assignment
+        have_scipy = True
+    except Exception:
+        have_scipy = False
+
+    def best_mapping() -> dict[str, str]:
+        if have_scipy and pred_labels and gt_spks:
+            import numpy as np
+            w = np.zeros((len(pred_labels), len(gt_spks)))
+            for i, p in enumerate(pred_labels):
+                for j, g in enumerate(gt_spks):
+                    w[i, j] = conf.get((p, g), 0)
+            ri, cj = linear_sum_assignment(-w)
+            return {pred_labels[i]: gt_spks[j] for i, j in zip(ri, cj) if w[i, j] > 0}
+        # 无 scipy 的回退：按判对帧数降序贪心（GT/pred 一对一）
+        m: dict[str, str] = {}
+        used_g: set[str] = set()
+        for (p, g), cnt in sorted(conf.items(), key=lambda kv: -kv[1]):
+            if p not in m and g not in used_g and cnt > 0:
+                m[p] = g
+                used_g.add(g)
+        return m
+
+    mapping = best_mapping()
+    err = gt_total - sum(c for (p, g), c in conf.items() if mapping.get(p) == g)
     # err = GT 语音帧中未判对的 = miss + confusion（FA 不在 GT 语音里，不计入 err）
     conf_frames = err - miss_frames
     fa = fa_frames
