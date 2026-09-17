@@ -20,7 +20,10 @@ class Settings(BaseSettings):
     pipeline_batch_max_sec: float = 15.0    # 超过强制硬切（防长句/长静音拖死批次）
     pipeline_chunk_timeout_sec: float = 120  # /meeting_chunk 超时（实测 30s 音频约 17s）
     pipeline_vad_timeout_sec: float = 30    # 批次切点 VAD 超时
-    pipeline_vad_max_end_silence_ms: int = 250  # 与 GPU /vad 默认一致
+    pipeline_vad_max_end_silence_ms: int = 800  # VAD 句尾静音判停阈值。250 时人正常换气停顿
+    # (300-600ms) 被切断，一句话碎成 1-2s 片（49385009f6fd 实测）；800 为 fsmn-vad
+    # 常用配置，段合并后更利于聚类与 ASR 上下文。旧 .env 键 VAD_MAX_END_SILENCE_MS 是
+    # 死键（无对应字段，从未生效），已改名 PIPELINE_VAD_MAX_END_SILENCE_MS。
     # 匿名聚类簇内切簇落差（split_gap）：同人段间相似度自然分布宽度 0.15+，
     # 注册场景的 0.12 会把聚好的簇拆成单段簇（盲测 6 真人出 30 陌生人）。
     # 0.35 起激进调参验证中（2026-09-16）
