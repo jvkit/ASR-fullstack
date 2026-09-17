@@ -58,11 +58,14 @@ class Settings(BaseSettings):
     llm_base_url: str = "http://127.0.0.1:4000/v1"
     llm_api_key: str = ""
     llm_model: str = "chat"
-    llm_timeout_sec: int = 120
+    llm_timeout_sec: int = 300
     llm_correction_enabled: bool = True   # 批次文字纠错开关
 
     # 批次 LLM 增强（每批完成后触发：修正上轮 + 纠错本轮 + 滚动纪要）
-    roll_llm_timeout_sec: float = 45      # 每批 LLM 合并调用超时（网关抽风秒失败，批次滚入下批补纠）
+    # 实测内网网关同请求延迟 19s~230s 波动（共享 vLLM 排队），45s 会导致
+    # 会上纠错批量超时死亡（日志 CancelledError、原文永不纠正）——放宽到 300s，
+    # 宁可纪要滞后也不丢纠错；批次在飞期间自动合并，不丢批。
+    roll_llm_timeout_sec: float = 300
 
     # Langfuse
     langfuse_enabled: bool = False
