@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { showToast } from 'vant'
 
 interface Attr { key: string; value: string }
@@ -20,7 +20,11 @@ const title = ref('')
 const meetingId = ref('')
 const attrs = ref<Attr[]>([])
 const startedAt = ref('')
-const audioUrl = ref('')
+const rawAudioUrl = ref('')
+const audioMode = ref<'denoised' | 'raw'>('denoised')  // 回放默认降噪版；原始版为存档生肉
+const audioUrl = computed(() =>
+  audioMode.value === 'raw' ? rawAudioUrl.value : `/api/meetings/${props.meetingId}/audio_denoised`
+)
 const utterances = ref<Utterance[]>([])   // 会中批次版（准实时）
 const reSegs = ref<ReSeg[]>([])           // 会末终版（全场重跑，更准）
 const reannotated = ref(false)
@@ -74,7 +78,7 @@ async function load() {
     meetingId.value = detail.id || props.meetingId
     attrs.value = detail.attributes || []
     startedAt.value = detail.started_at || ''
-    audioUrl.value = detail.audio_url || ''
+    rawAudioUrl.value = detail.audio_url || ''
     utterances.value = detail.utterances || []
     reSegs.value = detail.utterances_re || []
     reannotated.value = !!detail.reannotated
@@ -133,6 +137,11 @@ async function downloadMarkdown() {
     </van-cell-group>
 
     <van-cell-group inset class="block" title="录音回放">
+      <!-- 双版本切换：降噪版=与识别/声纹同一份 GTCRN 处理（默认）；原始版=存档生肉 -->
+      <div v-if="audioUrl" class="audio-mode">
+        <span :class="{ on: audioMode === 'denoised' }" @click="audioMode = 'denoised'">降噪版</span>
+        <span :class="{ on: audioMode === 'raw' }" @click="audioMode = 'raw'">原始版</span>
+      </div>
       <!-- 录音控件：原位播放；滚出屏幕后吸顶固定（同一 audio 元素，播放不中断） -->
       <div v-if="audioUrl" ref="audioSlotRef" class="audio-slot">
         <audio
@@ -208,6 +217,14 @@ async function downloadMarkdown() {
 .detail-title { flex: 1; font-weight: 600; font-size: 15px; word-break: break-word; }
 .block { margin-top: 12px; }
 .audio-slot { min-height: 40px; }
+.audio-mode { display: flex; gap: 0; padding: 8px 16px 4px; }
+.audio-mode span {
+  padding: 4px 14px; font-size: 13px; color: #646566; cursor: pointer;
+  border: 1px solid #dcdee0; border-right: none;
+}
+.audio-mode span:first-child { border-radius: 4px 0 0 4px; }
+.audio-mode span:last-child { border-right: 1px solid #dcdee0; border-radius: 0 4px 4px 0; }
+.audio-mode span.on { background: #1989fa; border-color: #1989fa; color: #fff; }
 .audio-el { width: 100%; }
 .audio-el--fixed {
   position: fixed;

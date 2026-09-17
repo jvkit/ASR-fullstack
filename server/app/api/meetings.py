@@ -118,6 +118,34 @@ async def meeting_audio(meeting_id: str) -> FileResponse:
     return FileResponse(path, media_type="audio/wav", filename=f"{meeting_id}.wav")
 
 
+@router.get("/meetings/{meeting_id}/audio_denoised")
+async def meeting_audio_denoised(meeting_id: str) -> FileResponse:
+    """降噪版回放：原始录音过 GTCRN（与识别/声纹同一份处理），落盘缓存只算一次。
+
+    原始存档不动；本端点按需生成 recordings/_denoised/<id>.wav。
+    """
+    from starlette.concurrency import run_in_threadpool
+
+    src = Path(settings.recordings_dir) / f"{meeting_id}.wav"
+    if not src.is_file():
+        raise HTTPException(404, "recording not found")
+    cache_dir = Path(settings.recordings_dir) / "_denoised"
+    cache = cache_dir / f"{meeting_id}.wav"
+
+    def _build() -> None:
+        import soundfile as sf
+        from app.core.preprocess import denoise_pcm
+        data, _sr = sf.read(str(src), dtype="int16")
+        out = denoise_pcm(data.tobytes())
+        cache_dir.mkdir(exist_ok=True)
+        with open(cache, "wb") as f:
+            f.write(out)
+
+    if not cache.is_file():
+        await run_in_threadpool(_build)
+    return FileResponse(cache, media_type="audio/wav", filename=f"{meeting_id}_denoised.wav")
+
+
 @router.get("/meetings/{meeting_id}/summaries")
 async def meeting_summaries(meeting_id: str) -> list[dict]:
     async with SessionLocal() as db:
