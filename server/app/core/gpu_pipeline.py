@@ -57,6 +57,8 @@ async def meeting_chunk(pcm: bytes, hotwords: str = "", timeout_sec: float | Non
     （未确认候选回传为 cand 条目，段标"待定"）。
     """
     try:
+        from app.core.preprocess import denoise_pcm
+        pcm = denoise_pcm(pcm)  # 集中降噪层：会中批次/会末重标注共用此入口
         data: dict = {
             "name_threshold": str(settings.reannotate_name_threshold),
             "max_end_silence_ms": str(settings.pipeline_vad_max_end_silence_ms),

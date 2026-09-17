@@ -44,6 +44,8 @@ async def enroll_speaker(
     """
     if len(audio) < MIN_ENROLL_BYTES:
         raise HTTPException(400, f"音频太短：{len(audio) / 32000:.1f}s < 3s，请自然说 20~60 秒")
+    from app.core.preprocess import denoise_pcm
+    audio = denoise_pcm(audio)  # 与会议推理同信号处理，防向量漂移
     params = {
         "min_total_sec": settings.enroll_min_total_sec,
         "min_seg_sec": settings.enroll_min_seg_sec,
@@ -74,6 +76,8 @@ async def identify_speaker(audio: bytes = Body(...)) -> dict:
     """
     if len(audio) < 16000 * 2 * 1.5:
         raise HTTPException(400, f"音频太短：{len(audio) / 32000:.1f}s，请说 3~10 秒")
+    from app.core.preprocess import denoise_pcm
+    audio = denoise_pcm(audio)
     try:
         async with httpx.AsyncClient(timeout=60) as cli:
             r = await cli.post(

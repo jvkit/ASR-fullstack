@@ -45,6 +45,12 @@ class Settings(BaseSettings):
     # SeACo 热词偏置强度 λ（2026-09-17 矩阵定档：5000词@λ0.1 质量零代价，λ1.0 满格会帮倒忙）
     pipeline_hw_weight: float = 0.1
 
+    # 降噪预处理层（2026-09-17 降噪决赛当选：西工大 GTCRN，DNS3 权重）。
+    # 集中处理：meeting_chunk（会中批次+会末重标注）与声纹注册/识别统一走 preprocess.denoise_pcm；
+    # 原始 PCM 存档不受影响，关闭即回到未降噪链路。
+    denoise_enabled: bool = True
+    denoise_model_path: str = "models/gtcrn_dns3.tar"  # 相对 server/ 目录
+
     # 说话人认人阈值（会议中批次 + 会末重标注 + 手动重标注共用此一个旋钮；
     # 注册人真实匹配分落在 0.44~0.61。2026-09-15 由 0.30 收紧到 0.40：
     # 实测同事说话误匹配 0.389、咳嗽误匹配 0.5+（均贴到冯忠俊——其合并质心
