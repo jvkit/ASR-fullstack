@@ -127,3 +127,104 @@ B) LLM 上下文纠错（词表塞 prompt，管 5k 词无压力，理解上下�
    提高阈值完全无效（0.85→0.95 只降 20%）。
 2. 结论坐实：模糊模式=无语境的拼音同音字替换器，任何规模都不可用；
    **唯一可用模式=显式"错词=>对词"对表（结构上零误伤）**。LLM 上下文纠错为另一条活路。
+
+## VAD 尾端静音实验（2026-09-17，M会300s重放，降噪开）
+
+| VAD end_silence | meeting_id | DER | 终版子段数 | 结论 |
+|---|---|---|---|---|
+| 250ms（旧） | a09b6918322d（门禁-降噪开启，他AI测） | **12.3%**（AGENTS记录） | 多（1-2s碎片） | 归属准，展示碎 |
+| 800ms（本次） | bb3cd75f14e8 | **48.8%**（miss10+FA2+conf130 /290s） | 29 | 灾难：预测只剩陌生人1 |
+
+诊断（diag_opening_sim.py，生产同路径 降噪→VAD→embed）：
+- 800ms 下开场 4-14s 的 7 人自我介绍（人间停顿仅~300ms）被揉成一段 7.45s 多人混合段
+  → embedding 是多人平均向量 → 聚类只能贴一个标签。跨人相似度 0.34 与地板 0.35 贴边是
+  混合段的假象，不是降噪的锅（raw vs denoise 矩阵几乎一致，干净会 GTCRN 近透明）。
+- 800ms 对连读讲话友好（22-81s 段合并完整），但归属原子被毁，DER 不可接受。
+
+结论：VAD 放宽方向错误。正解 = VAD 回 250ms（保 DER 12.3% 的归属原子）
++ 连续同说话人短段显示层合并（解决展示碎）。待用户拍板后实施。
+
+## "全场陌生人1"根因定位（2026-09-17，bb3cd75f14e8，VAD800）
+
+GT 结构：001 独白 14.5-168.6s（156s），006 独白 170-295s（124s），开场 4-14s 六人轮流。
+全场只出陌生人1 = 006 的 124s 全被吸进陌生人1（映射 001）。
+
+diag_two_speaker.py（GT 段直算，排除 VAD 因素，降噪路径）：
+- 006 段 vs 006 质心：0.885~0.964（mean 0.937）
+- 006 段 vs 001 质心（陌生人1）：0.317~0.465（mean 0.374），**12/15 段 ≥ 地板 0.35 → 全部被吸收**
+- 两质心互似仅 0.399；同人/跨人 margin ≈ 0.57，极大
+
+结论：入簇地板 0.35 正好压在跨人相似度带(0.32~0.47)中间。800ms 长段向量稳，
+跨人相似度 confidently 0.37+ → 新说话人永远进不了候选（被贪婪吸收，两次确认制永不触发）。
+250ms 时短段向量抖、大量落在 0.35 以下 → 能进候选成簇，所以旧配置 DER 12.3%。
+数据支持把地板大幅上调（跨人 max 0.465 vs 同人 p10 0.66+，0.50~0.55 都安全），
+或段长自适应地板（≥3s 长段用高地板）。待用户拍板。
+
+### 降噪对声纹分布的影响（diag_denoise_margin.py，同音频 GT 段 raw vs 降噪）
+
+| 指标 | RAW | GTCRN |
+|---|---|---|
+| 001 同人 min | 0.902 | 0.859 |
+| 006 同人 min | 0.890 | 0.885 |
+| 006→001 跨人 max / mean | **0.520 / 0.447** | **0.465 / 0.374** |
+| margin（同人min-跨人max） | 0.370 | **0.394** |
+
+用户假设证实：降噪主要把**跨人**相似度压下来（噪声驱动的假性相似被消除），
+同人几乎不动 → 区分度拉大。推论：地板 0.35 在降噪后更离谱（跨人带 0.37~0.46 整体悬空
+在地板上方），上调地板的安全边界更宽。
+
+## 聚类地板标定（2026-09-17，calib_floor_gpu.py，3场会×前300s×GT标签×250ms段×GTCRN路径）
+
+| 组 | n | p95/max（跨人） | p5/min（同人） |
+|---|---|---|---|
+| 男男 MM | 532 | 0.424 / **0.573** | — |
+| 女女 FF | 224 | 0.428 / 0.520 | — |
+| 男女 MF | 733 | 0.400 / 0.583 | — |
+| 同人 M | 312 | — | 0.564 / 0.180 |
+| 同人 F | 133 | — | 0.518 / 0.354 |
+
+合并：同人 p5=0.548，跨人 p95=0.415 → **中点=0.481**。
+关键读数：
+1. 现地板 0.35 < 跨人 p95 0.415 → 结构上必然过合并，标定实锤。
+2. 跨人 max 0.52~0.58 超过中点——尾部重叠无法靠单一阈值根治，0.48 是最小错误率工作点。
+3. 男男 max 0.573 偏高（M会002仅1段、S会003-M为主，男男样本仍薄），DER 验证重点盯。
+4. 同人 min 0.18 离群段存在（疑似错标/极短段），p5 更可信。
+
+## 说话人分离擂台赛 阶段1：3D-Speaker 用法研究（2026-09-18，scd_bench/，未跑正式评测）
+
+背景：拍板评估 3D-Speaker（ModelScope 分发，VAD+CAM++embedding+谱聚类 管线，
+官方 AISHELL-4 DER 10.30% w/ overlap、CPU RTF 0.03）能否替代自研分离管线。
+试验田 `meeting-asr/scd_bench/`（自包含，README/NOTES 在其中），阶段1=用法研究。
+
+环境（WSL2 本机，uv venv --python /usr/bin/python3 3.10.12）：
+- torch 2.6.0+cpu / torchaudio 2.6.0+cpu、modelscope 1.24.1、funasr 1.4.15、
+  pyannote-audio 4.0.7、numpy 2.2.6、scikit-learn 1.7.2、scipy 1.15.3、
+  fastcluster/umap-learn/hdbscan（speakerlab 隐式依赖）、addict/datasets（modelscope 运行期缺包）。
+- MODELSCOPE_CACHE 重定向 scd_bench/models/cache（CAM++ 28M + FSMN VAD 1.7M 已缓存）。
+
+踩坑（按 安装/用法/能力 三分类）：
+1. [安装] infer_diarization.py 模块级 import pyannote.audio，requirements.txt 未声明
+   → uv pip install pyannote.audio（顺带把 numpy 升 2.x、sklearn 升 1.7.2，
+   官方钉的 numpy<1.24/sklearn==1.0.2 被打破，按"示例能跑通"准则放行并记录）。
+2. [安装] speakerlab/process/cluster.py 模块级 import fastcluster/umap/hdbscan，未声明 → 补装。
+3. [安装] torchaudio≥2.11 的 torchaudio.load 硬走 torchcodec（需系统 ffmpeg7+CUDA 库，
+   CPU 环境无解）→ torch/torchaudio 退 2.6.0（自带 sox 后端），卸载 torchcodec。
+4. [安装] modelscope VAD pipeline 需 modelscope[audio]（funasr），且运行期缺 addict/datasets。
+5. [安装] modelscope[audio] 会把 torch 换成 CUDA 版 → 装完 --reinstall --no-deps 回 CPU 版。
+
+官方示例复现（成功，EXIT=0）：
+```
+export MODELSCOPE_CACHE=$PWD/models/cache
+.venv/bin/python 3D-Speaker/speakerlab/bin/infer_diarization.py \
+    --wav out/M_R003S01C01_ch0_head60s.wav --out_dir out/diar_head60s
+```
+小样本核对（前 60s，M_R003S01C01，GT 11 段 6 人）：
+- 系统 8 段 3 标签。短轮次 5 人（002-M/003-F/004-F/005-F/006-F，各 1.3~1.7s）
+  被合并为 1 簇（段内五人重叠 17~23%）；主持人 001-M 被劈成 2 簇交替。
+- 边界：首段完美（Δ+0.01s）；长段起点系统性偏晚 +1.2~1.5s，内部有无中生有切换。
+- [能力] 归因：子段<40 走 AHC 短段分支（fix_cos_thr=0.4），谱聚类参数不生效；
+  且 --speaker_num oracle 在该分支被静默忽略（cluster.py:192 不透传）。
+- [用法] 全曲 38min 计时 147.9s（RTF≈0.065，官方标称 0.03）；全曲输出 6 标签 519 段
+  （GT 6 人 641 段）。60s 小窗 RTF 0.10~0.19。
+- 阶段2建议：必须全曲评（勿用 <40 段短窗）；DER 复用 replay_der greedy 映射；
+  默认档（自动估人数）为主、oracle 档作上限参考。详见 scd_bench/NOTES-用法研究.md。

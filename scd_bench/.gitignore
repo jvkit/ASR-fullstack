@@ -1,0 +1,6 @@
+.venv/
+models/
+out/
+3D-Speaker/
+__pycache__/
+*.pyc
