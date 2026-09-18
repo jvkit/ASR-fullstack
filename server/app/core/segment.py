@@ -6,6 +6,26 @@ import asyncio
 from dataclasses import dataclass, field
 
 
+def merge_display_rows(rows: list[dict], gap_ms: int) -> list[dict]:
+    """显示层合并：同 speaker 且间隙 <= gap_ms 的相邻行并成一行（纯展示，不动数据）。
+
+    2026-09-18 配合 VAD 回 250ms 的碎段治理：DB 保留原子段（LLM 纠错、
+    滚动纪要、GT 评测都按原子段工作），仅在详情接口序列化时合并视图。
+    行格式 {"seq","speaker","text","start_ms","end_ms"}；text 直接拼接
+    （CT-Transformer 标点已按段补齐，拼接后语义连贯）。
+    """
+    out: list[dict] = []
+    for r in rows:
+        if out and out[-1]["speaker"] == r["speaker"] \
+                and r["start_ms"] - out[-1]["end_ms"] <= gap_ms:
+            prev = out[-1]
+            prev["end_ms"] = r["end_ms"]
+            prev["text"] = (prev["text"] + (r["text"] or "")).strip()
+        else:
+            out.append(dict(r))
+    return out
+
+
 @dataclass
 class UtteranceItem:
     seq: int

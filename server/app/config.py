@@ -20,18 +20,23 @@ class Settings(BaseSettings):
     pipeline_batch_max_sec: float = 15.0    # 超过强制硬切（防长句/长静音拖死批次）
     pipeline_chunk_timeout_sec: float = 120  # /meeting_chunk 超时（实测 30s 音频约 17s）
     pipeline_vad_timeout_sec: float = 30    # 批次切点 VAD 超时
-    pipeline_vad_max_end_silence_ms: int = 800  # VAD 句尾静音判停阈值。250 时人正常换气停顿
-    # (300-600ms) 被切断，一句话碎成 1-2s 片（49385009f6fd 实测）；800 为 fsmn-vad
-    # 常用配置，段合并后更利于聚类与 ASR 上下文。旧 .env 键 VAD_MAX_END_SILENCE_MS 是
+    pipeline_vad_max_end_silence_ms: int = 250  # VAD 句尾静音判停阈值。
+    # 250 vs 800 的取舍（2026-09-18 定档 250）：800 会把开场自我介绍这类
+    # 人间停顿仅 ~300ms 的轮流发言揉成多人混合段 → embedding 多人平均 →
+    # 整段只能贴一个标签（DER 48.8% vs 250 的 12.3%，bb3cd75f14e8 实测证伪 800）。
+    # 250 保归属原子；碎段展示问题由 display_merge_gap_sec 显示层合并解决，
+    # 不在 VAD 层妥协。旧 .env 键 VAD_MAX_END_SILENCE_MS 是
     # 死键（无对应字段，从未生效），已改名 PIPELINE_VAD_MAX_END_SILENCE_MS。
     # 匿名聚类簇内切簇落差（split_gap）：同人段间相似度自然分布宽度 0.15+，
     # 注册场景的 0.12 会把聚好的簇拆成单段簇（盲测 6 真人出 30 陌生人）。
     # 0.35 起激进调参验证中（2026-09-16）
     anon_split_gap: float = 0.20
     # 匿名聚类入簇地板（anon_threshold）：段对簇质心相似度 ≥ 此值才入簇。
-    # 同人段间 p10=0.66、跨人 max=0.58（女女），0.45 留有 0.07 余量；
-    # 降到 0.40 收碎段（激进调参验证中，2026-09-16）
-    anon_cluster_threshold: float = 0.35
+    # 定档 0.48（2026-09-18，3 场会 GT 标定 calib_floor_gpu.py）：同人段 p5=0.548、
+    # 跨人 p95=0.415，中点 0.481。原 0.35 低于跨人 p95 → 结构上必然过合并
+    # （"全场陌生人1"实锤）。尾部跨人 max 0.52~0.58 超 0.48 为已知限制，
+    # 单一阈值无法根治，属最小错误率工作点。DER 验证记录见 eval/tuning_log.md。
+    anon_cluster_threshold: float = 0.48
     # 匿名簇两次确认制：候选攒满 confirm_count 段才升级发号（防 0.5s 语气词自立簇心；
     # 2026-09-16 设计，日志 [anon] 可审计每个段的去向）
     anon_confirm_count: int = 2
@@ -42,6 +47,10 @@ class Settings(BaseSettings):
     anon_tail_min_sim: float = 0.25
     # 显示层：簇总时长 < 此值不显示陌生人编号，统一"未识别短语音"（身份数据不受影响）
     anon_display_min_sec: float = 3.0
+    # 显示层合并：详情接口序列化时，同说话人且间隙 ≤ 此秒数的相邻段并成一行展示
+    # （2026-09-18，配合 VAD 回 250 的碎段治理；只影响展示/阅读，不动 DB 原子段
+    # 与聚类逻辑，LLM 纠错仍按原 seq 落各自的行，合并视图拼接 corrected 文本）
+    display_merge_gap_sec: float = 2.0
     # ASR 后处理：CT-Transformer 标点模型 + WeTextProcessing ITN（百分之五十->50%）
     pipeline_punc_enabled: bool = True
     pipeline_itn_enabled: bool = True

@@ -9,6 +9,7 @@ from fastapi.responses import FileResponse
 from sqlalchemy import select
 
 from app.config import settings
+from app.core.segment import merge_display_rows
 from app.db.database import SessionLocal
 from app.db.models import Meeting, ReAnnotateUtterance, Summary, Utterance
 
@@ -60,6 +61,7 @@ async def meeting_detail(meeting_id: str) -> dict:
             select(ReAnnotateUtterance).where(ReAnnotateUtterance.meeting_id == meeting_id)
             .order_by(ReAnnotateUtterance.seq)
         )).scalars().all()
+        gap_ms = int(settings.display_merge_gap_sec * 1000)
         return {
             "id": meeting.id,
             "title": meeting.title,
@@ -76,17 +78,17 @@ async def meeting_detail(meeting_id: str) -> dict:
                 if (Path(settings.recordings_dir) / f"{meeting_id}.wav").is_file()
                 else None
             ),
-            "utterances": [
+            "utterances": merge_display_rows([
                 {"seq": u.seq, "speaker": u.speaker, "text": u.text,
                  "start_ms": u.start_ms, "end_ms": u.end_ms}
                 for u in utts
-            ],
+            ], gap_ms),
             # 会末重标注版（阿里 pipeline 切分 + ERes2NetV2 声纹标身份；段级时间+文字）
-            "utterances_re": [
+            "utterances_re": merge_display_rows([
                 {"seq": u.seq, "speaker": u.speaker, "text": u.text,
                  "start_ms": u.start_ms, "end_ms": u.end_ms}
                 for u in re_utts
-            ],
+            ], gap_ms),
         }
 
 
