@@ -1,0 +1,281 @@
+{
+  "seed": 5,
+  "roster_preset": "m6",
+  "rounds": 6,
+  "speakers_per_round": 6,
+  "target_speech_sec_per_person": 30.0,
+  "target_total_sec": 240.0,
+  "seg_clamp": [
+    1.5,
+    15.0
+  ],
+  "max_sents_per_round": 2,
+  "change_gap_sec": [
+    0.8,
+    2.0
+  ],
+  "sentence_pause_sec": [
+    0.25,
+    0.4
+  ],
+  "round_pause_sec": [
+    0.0,
+    3.0
+  ],
+  "round_pause_actual": [
+    1.02,
+    3.0,
+    2.9,
+    3.0,
+    1.63
+  ],
+  "actual_total_sec": 239.99,
+  "speech_sec": 184.08,
+  "speech_ratio": 0.767,
+  "speaker_seconds": {
+    "001-M": 30.49,
+    "002-M": 30.64,
+    "003-F": 32.24,
+    "004-F": 30.24,
+    "005-F": 30.2,
+    "006-F": 30.26
+  },
+  "speaker_turns": {
+    "004-F": 6,
+    "002-M": 6,
+    "003-F": 6,
+    "005-F": 6,
+    "001-M": 6,
+    "006-F": 6
+  },
+  "speaker_changes": 30,
+  "change_gap_stats": {
+    "n": 30,
+    "min": 0.812,
+    "mean": 1.376,
+    "max": 1.993
+  },
+  "round_pause_stats": {
+    "n": 5,
+    "min": 1.02,
+    "mean": 2.31,
+    "max": 3.0
+  },
+  "sentences_total": 46,
+  "material_reuse_count": 0,
+  "roster": [
+    {
+      "src": "M_R003S01C01",
+      "spk": "001-M",
+      "gt": "001-M"
+    },
+    {
+      "src": "M_R003S01C01",
+      "spk": "002-M",
+      "gt": "002-M"
+    },
+    {
+      "src": "M_R003S01C01",
+      "spk": "003-F",
+      "gt": "003-F"
+    },
+    {
+      "src": "M_R003S01C01",
+      "spk": "004-F",
+      "gt": "004-F"
+    },
+    {
+      "src": "M_R003S01C01",
+      "spk": "005-F",
+      "gt": "005-F"
+    },
+    {
+      "src": "M_R003S01C01",
+      "spk": "006-F",
+      "gt": "006-F"
+    }
+  ],
+  "note_gender": "3男3女优先：M会仅2男声，L会可用男声素材均<170s，实际2男4女",
+  "segments": [
+    {
+      "speaker": "004-F",
+      "start": 0.0,
+      "dur": 5.44
+    },
+    {
+      "speaker": "002-M",
+      "start": 6.3881,
+      "dur": 5.295
+    },
+    {
+      "speaker": "003-F",
+      "start": 12.6299,
+      "dur": 5.285
+    },
+    {
+      "speaker": "005-F",
+      "start": 19.4523,
+      "dur": 5.48
+    },
+    {
+      "speaker": "001-M",
+      "start": 26.7216,
+      "dur": 5.445
+    },
+    {
+      "speaker": "006-F",
+      "start": 33.1,
+      "dur": 5.355
+    },
+    {
+      "speaker": "001-M",
+      "start": 39.4711,
+      "dur": 5.3968
+    },
+    {
+      "speaker": "004-F",
+      "start": 46.7417,
+      "dur": 5.015
+    },
+    {
+      "speaker": "003-F",
+      "start": 53.7496,
+      "dur": 5.175
+    },
+    {
+      "speaker": "005-F",
+      "start": 60.5715,
+      "dur": 5.13
+    },
+    {
+      "speaker": "002-M",
+      "start": 67.0271,
+      "dur": 5.07
+    },
+    {
+      "speaker": "006-F",
+      "start": 73.1168,
+      "dur": 5.02
+    },
+    {
+      "speaker": "002-M",
+      "start": 81.1368,
+      "dur": 4.475
+    },
+    {
+      "speaker": "006-F",
+      "start": 85.6118,
+      "dur": 1.7006
+    },
+    {
+      "speaker": "004-F",
+      "start": 89.3526,
+      "dur": 4.45
+    },
+    {
+      "speaker": "003-F",
+      "start": 93.8026,
+      "dur": 1.5
+    },
+    {
+      "speaker": "005-F",
+      "start": 96.6185,
+      "dur": 4.9922
+    },
+    {
+      "speaker": "001-M",
+      "start": 103.0773,
+      "dur": 4.635
+    },
+    {
+      "speaker": "005-F",
+      "start": 107.7123,
+      "dur": 1.59
+    },
+    {
+      "speaker": "002-M",
+      "start": 111.346,
+      "dur": 5.1
+    },
+    {
+      "speaker": "004-F",
+      "start": 117.5818,
+      "dur": 5.255
+    },
+    {
+      "speaker": "003-F",
+      "start": 125.7336,
+      "dur": 4.86
+    },
+    {
+      "speaker": "001-M",
+      "start": 132.079,
+      "dur": 4.31
+    },
+    {
+      "speaker": "006-F",
+      "start": 136.389,
+      "dur": 1.94
+    },
+    {
+      "speaker": "006-F",
+      "start": 139.875,
+      "dur": 4.8
+    },
+    {
+      "speaker": "002-M",
+      "start": 144.675,
+      "dur": 1.5318
+    },
+    {
+      "speaker": "003-F",
+      "start": 147.3623,
+      "dur": 3.9
+    },
+    {
+      "speaker": "001-M",
+      "start": 151.2623,
+      "dur": 2.02
+    },
+    {
+      "speaker": "004-F",
+      "start": 155.1686,
+      "dur": 5.0904
+    },
+    {
+      "speaker": "005-F",
+      "start": 161.6463,
+      "dur": 4.36
+    },
+    {
+      "speaker": "003-F",
+      "start": 166.0063,
+      "dur": 1.5083
+    },
+    {
+      "speaker": "004-F",
+      "start": 170.8176,
+      "dur": 3.71
+    },
+    {
+      "speaker": "001-M",
+      "start": 174.5276,
+      "dur": 1.5318
+    },
+    {
+      "speaker": "002-M",
+      "start": 178.3056,
+      "dur": 3.595
+    },
+    {
+      "speaker": "006-F",
+      "start": 181.9006,
+      "dur": 2.12
+    },
+    {
+      "speaker": "005-F",
+      "start": 185.445,
+      "dur": 3.875
+    }
+  ]
+}

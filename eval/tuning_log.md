@@ -228,3 +228,169 @@ export MODELSCOPE_CACHE=$PWD/models/cache
   （GT 6 人 641 段）。60s 小窗 RTF 0.10~0.19。
 - 阶段2建议：必须全曲评（勿用 <40 段短窗）；DER 复用 replay_der greedy 映射；
   默认档（自动估人数）为主、oracle 档作上限参考。详见 scd_bench/NOTES-用法研究.md。
+
+## 说话人分离擂台赛 阶段2：正式评测（2026-09-18，进行中）
+
+### EEND 分支核查（评测前第一件事）
+- 3D-Speaker 仓库 `grep -ri eend` 零命中；官方发布文（阿里语音AI 2024-12，
+  aliyun article/1647034 同源镜像 nxrte.com/jishu/54860.html）自述"EEND分支=
+  pyannote/segmentation-3.0（SincNet），职责=局部重叠语音检测，与聚类分支对齐"。
+- ModelScope 一体化卡片 speech_campplus_speaker-diarization_common 自述
+  "分段-聚类模块化框架"。→ EEND 无独立切分路径。
+- pyannote/segmentation-3.0 为 HF gated 模型，实测 "Cannot access gated repo"（代理可达），
+  无 token 跑不通。ModelScope 另有 EEND-OLA（iic/speech_diarization_eend-ola-en-us-callhome-8k）
+  但英文 8k callhome 域不匹配。
+- 归因：不存在（独立路径）+ 用法受限（overlap 分支需 HF token）。评测只跑聚类分支；
+  对"无静音换人切开"诉求：聚类分支=同范式，改进而非根治。
+
+### 评测集
+- 5min 切片 M_R003S01C01_0m（GT=0-300s 截断 40 行 6 人）
+- M 全曲 2282s / L 全曲 2362s（完整 rttm）
+- 无缝拼接件 splice6.wav（72s）：L_R003S01C02, M_R003S02C01, S_R003S01C01,
+  L_R004S02C01, M_R003S04C01, S_R004S01C01 各前 12s 零间隙拼接；
+  GT 25 段 24 说话人（ID 已加会议名前缀，scripts/make_splice.py）
+- DER 口径：scripts/der_eval.py，100ms 帧、GT 重叠按说话人帧计、scipy 匈牙利最优映射、
+  collar 0.25（标准）与 0（strict）双档。
+
+### 已完成结果（der_eval 口径）
+- M_0m 聚类分支：collar0.25 DER 26.21%（miss 24.93+conf 1.28），strict 27.56%
+  ——系统只得 2 标签（0→001-M, 1→006-F），而 0-300s GT 由 001-M(156s)+006-F(130s)
+  两个主述者主导（微轮次 002-005 各仅 1-2s）。对比自研基线同件 12.3%（降噪后）。
+  归因： miss 主导=边界/覆盖侵蚀+微轮次丢失；人数估成 2 未崩但不覆盖。
+- 拼接件自研基线（replay meeting 9dbe0cd487ae，21 段仅 2 标签）：
+  replay_der 原生口径 DER 119.7%；der_eval 口径 collar0.25 85.71% / strict 88.79%
+  （纯 confusion：全部并给陌生人1）。跨缝合并实锤。
+
+### 阶段2 全部 DER 结果（der_eval 口径：100ms 帧/匈牙利映射/GT 重叠按说话人帧）
+| 音频 | 时长 | collar0.25 | strict(0) | miss/FA/conf (c0.25) | 系统标签/GT人 |
+|---|---|---|---|---|---|
+| M_0m 5min 切片 | 300s | 26.21% | 27.56% | 24.93/0/1.28 | 2 / 6（基线同件 12.3% 胜出） |
+| M 全曲 | 2282s | 29.24% | 34.23% | 25.94/0/3.30 | 6 / 6 |
+| L 全曲 | 2362s | 17.83% | 21.47% | 16.58/0/1.24 | 7 / 7 |
+| splice6 拼接件 3D-Speaker | 72s | 62.76% | 69.62% | 3.06/0/59.69 | 5 / 24 |
+| splice6 拼接件 自研基线 | 72s | 85.71% | 88.79% | 0/0/85.71 | 2 / 24 |
+
+- 基线原生口径（replay_der，10ms 无 collar）：DER 119.7%。两口径并列报告。
+- 拼接缝检查（scripts/splice_check.py）：3D-Speaker 3/5 缝跨缝合并（36/48/60s，
+  全发生在"左侧人声顶到缝"的缝上=有人声衔接的缝 3/3 全中）；自研基线 5/5 全合并。
+  3D-Speaker 合并段更短（1.6-3.2s vs 基线 3.1-5.3s），且聚出 5 标签 vs 基线 2 标签。
+- 失败归因三分类：能力问题——聚类分支=同范式（VAD 切段），无静音换人不能根治
+  （3/3 人声衔接缝全合并）；miss 主导（M 会 25.9%）=边界/覆盖侵蚀，与自研 VAD 漏检同类。
+- 全曲 RTF 实测：M_full 141.0s/2282s=0.062，L_full 161.3s/2362s=0.068
+  （官方标称 0.03；小件含模型加载固定开销：5min 81s、72s 拼接件 51s）。
+- 听感台：scd_bench/out/bench/index.html（5 块：拼接件×2 系统 + 切片/M全曲/L全曲；
+  每块=整段+按说话人合并试听 0.2s beep+段表+GT/系统时间线，相对路径）。
+- 基线 replay meeting_id=9dbe0cd487ae（后端 replay 前确认无进行中会议）。
+- 结论：3D-Speaker 聚类分支 4 件全面差于或接近基线（拼接件 62.8% vs 85.7% 是唯一
+  明显胜出项，但绝对值仍不可用）；无 EEND 独立路径。待用户听感验收定夺（阶段3）。
+
+## 擂台赛追加实验 A/B（2026-09-18，用户听感台后拍板）
+
+### 实验A：无缝打散正面对决（eval/shuffled/m_rr_gap0_s7，872s）
+- 造件：shuffle_meeting.py --gap 0 --mode roundrobin --max-seg 8 --min-seg 0.8 --seed 7
+  --max-sec 900（M会前15min，6人整句零间隙轮转，136段/118次换人=8.1次/min，相邻静音0）
+- 3D-Speaker：238段 3标签，DER collar0.25 36.01% / strict 38.25%（miss 34.6 conf 1.4）
+- 自研基线：replay meeting fb7e9ef3f895（★基线运行时段 2026-09-18 11:10:35~11:26:35，
+  期间勿用网页录音；开始前已确认无进行中会议），110段 **1标签**，DER 52.58% / 52.78%
+  （miss 5.5 conf 47.1——VAD覆盖好但全员并入陌生人1）
+- 换人点切开率：3D-Speaker 82/118=69%（74段横跨换人点）；同尺同工具对比 3D-Speaker
+  胜 16.6pp，但绝对值不可用。病灶对称性：基线=切得开聚不动，3D-Speaker=聚得准盖不住。
+- 对比拼接坟场(splice6 62.8%)：打散件更难（无缝轮转 vs 缝间天然静音），3D-Speaker
+  在小标签数(3 vs 5)下 confusion 仅1.4%——其聚类器本身稳，输在覆盖。
+
+### 实验B：降噪公平赛（5min 切片，项目 GTCRN 经 preprocess.denoise_pcm 处理）
+- 3D-Speaker+GTCRN：46段 2标签，DER collar0.25 **4.77%** / strict 6.33%
+  （miss 3.49 conf 1.28）vs 生肉 26.21% / 27.56%（miss 24.93 conf 1.28）
+- **miss 24.9→3.5（-21.4pp）**，confusion 不变——收益全部来自 VAD 覆盖；
+  结构(2标签)不变。注意口径：自研基线同件 12.3% 为 replay_der 口径（10ms无collar），
+  与 der_eval collar0.25 不可直比；strict 6.33% 与 replay_der 口径更接近，仍显著低于 12.3%。
+- 归因[能力]：3D-Speaker 生肉的 miss 病灶=FSMN VAD 对噪声敏感，降噪可解——
+  与自研管线当年"DER 19→12.3"同源。
+
+## 擂台赛补充：同尺复评基线 + 全曲降噪赛（2026-09-18）
+
+### 同尺复评 5min 切片基线（meeting 49385009f6fd，原 12.3% 为 replay_der 口径）
+- 导出 utterances_re → out/bench/diar_M_0m_baseline/M_0m_baseline.rttm（167 段 2 标签）
+- der_eval 同尺：collar0.25 **8.86%**（miss 2.10 conf 6.76）/ strict 10.55%
+- 与 3D-Speaker+GTCRN 同尺对照：4.77% / 6.33% —— 3D-Speaker 胜 ~4pp（同工具同口径）
+- 结构对比：基线 miss 更低（2.1 vs 3.5，覆盖好）但 conf 更高（6.8 vs 1.3，微轮次错并多）
+
+### 全曲降噪赛（GTCRN via preprocess.denoise_pcm → 3D-Speaker）
+| 件 | 生肉 c0.25 / strict | 降噪 c0.25 / strict | miss 变化 |
+|---|---|---|---|
+| M 全曲 | 29.24 / 34.23 | **9.71 / 14.79** | 25.9→5.2 |
+| L 全曲 | 17.83 / 21.47 | **4.88 / 8.32** | 16.6→3.0 |
+- 标签数 M 6→7、L 7→8（轻微过聚，conf +1~3pp），miss 崩塌式下降主导净收益。
+- 结论：全曲降噪条件同样碾压生肉，与 5min 切片实验B 规律一致——GTCRN 是 3D-Speaker
+  的前置刚需，不是可选项。
+
+## 裁判件 rotate40_s3 构造（2026-09-18，只造件+自检，未跑任何识别）
+
+- 脚本 scd_bench/scripts/make_rotate_meeting.py（--seed 3 --rounds 15，规格见 docstring）
+- 产物：eval/shuffled/rotate40_s3.{wav,rttm,recipe.json}
+- 阵容：001-M(M)/L_001-M(L补,M_002-M素材105s不足)/L_005-F(L补,M_003-F素材64s不足)/
+  004-F/005-F/006-F——3男3女优先，M会仅2男声且L会可用男声均<170s，实际2男4女（recipe 记录）
+- 自检：总时长 2400.0s（正中目标）| 语音 1081s 占 45.0% | 15 轮 75 次换人
+  | 每人 176.6~182.7s 全在 [170,190] | 换人气口 0.83~2.00s(均1.41) | 轮间 52.9~90.0s(均83.3)
+  | 素材复用 0 | rttm 无重叠、独立复算与 recipe 一致 | 语音区/静默区 RMS 对比 8e6 倍
+- 构造评价：说话节奏（1~3句/轮、气口0.8-2s）拟真；但 45% 语音密度+20~90s 长静默
+  明显比 aishell4 原生会议（~90% 密度、抢话重叠）温和——是"中等负荷裁判件"，
+  测"切分+聚类基本功"，不测极端密度。
+
+## 聚类地板三件套定档（2026-09-18：VAD 回 250 + 地板 0.48 + 显示层合并）
+
+实施（用户拍板"设置为0.48并确保欧克"）：
+- VAD 800→250：800 证伪（开场自我介绍揉团，DER 48.8% vs 12.3%，bb3cd75f14e8）
+- 地板 0.35→0.48：GT 标定同人 p5=0.548/跨人 p95=0.415 中点 0.481
+- 显示层合并：详情接口同 speaker 相邻段间隙 ≤2s（display_merge_gap_sec）并一行；
+  DB 保原子段，纠错/评测不受影响
+
+DER 验证（M 会 300s 重放，GTCRN 降噪路径，replay_der 口径）：
+| 地板 | meeting_id | DER | 分解 |
+|---|---|---|---|
+| 0.48（定档） | a631a822c911 | **10.1%** | miss 14s + FA 2s + conf 13s / 290s |
+
+对比基线：地板0.35+250ms+降噪 = 12.3%。映射全对：陌生人1=001（156s独白）、
+陌生人3=006（124s独白），006 被吸收进陌生人1 的过合并消除。
+0.45/0.50 两档用户要求自己跑补测。
+
+环境事故记录：GPU diarize 服务于 2026-09-18 被静默杀死 2 次（无报错、无 OOM
+迹象、无内核日志权限可查）；已在 GPU 部署 run_supervised.sh 监督自启
+（3s 拉起，死亡时间线 diarize_svc_respawn.log）。
+
+## rotate40_s3 裁判件首测（2026-09-18，3D-Speaker+GTCRN，公平条件；未跑自研基线——8010 被救援AI占用）
+
+- 流程：denoise_wav.py（GTCRN，2400s）→ infer_diarization（wall 144.4s，RTF 0.060）
+  → der_eval vs eval/shuffled/rotate40_s3.rttm
+- DER：collar0.25 **19.93%**（miss 3.25 conf 16.68 FA 0）/ strict 20.94%
+- **标签 6/6 GT 全中**；换人点切开 97%（85/88）；覆盖 89~99%/人
+- 病灶定位：双男声（001-M 与 L_001-M）被合并进同一簇（标签1 含 001-M 96% 帧），
+  另产 1 个 10.7s 垃圾簇（标签5 未映射）——conf 16.7% 几乎全部来自这一次男男合并。
+  若拆开，DER 将 ~3-4%。其余 4 女 1 男各归各簇、命中 90-97%。
+- 对比：raw shuffle 36.0% → 裁判件+降噪 19.9%（密度温和+GTCRN 双重收益）；
+  miss 3.25% 证明"降噪接入"后覆盖问题在常规密度件上基本解决。
+- 听感台新增"rotate40 裁判件"区块（红框，9 块）。json: out/bench/der_rotate40_c*.json
+
+## 冷知识核查：aishell4 L 会与 M 会同编号是否同人（2026-09-18，GPU 声纹验证）
+
+- 工具：生产同款 iic/speech_eres2netv2_sv_zh-cn_16k-common（GPU funasr 1.4.13 venv），
+  脚本 GPU:ai-script/check_cross_meeting_spk.py（本地副本 scd_bench/scripts/）
+- 三对余弦（各取 5~8s 段）：
+  ① M_001-M vs L_001-M = **0.6863** → 同人(>0.60) ★用户冷知识为真
+  ② M_005-F vs L_005-F = 0.4131 → 不同人
+  ③ M_001-M vs M_004-F = 0.1834 → 不同人（对照组，方法学正常）
+- 推论：rotate40 裁判件上 3D-Speaker 把 001-M 与 L_001-M 合一簇**是对的**，
+  是 GT 把同一人拆成两人。修正 GT（001-M 合并）重评：
+  **DER collar0.25 5.79%（miss 3.25 conf 2.54）/ strict 6.97%**，6 标签全映射 5 GT 人。
+  rotate40 真实成绩从 19.9% 修正为 5.8%——"双男声合并"病灶撤销，残留=垃圾簇+微 conf。
+
+## rotate_m30_s5 短裁判件（2026-09-18，任务2/3；M 原生 6 人，未跨会议）
+
+- 构造：make_rotate_meeting.py --roster m6 --seed 5 --target-speech-sec 30 --rounds 6
+  --seg-max 15 --max-sents 2 --round-pause 0 3（v2 参数化版；v1 选择逻辑见脚本历史）
+- 自检：240.0s | 语音 184s 76.7% | 每人 30.2~32.2s | 6 轮 30 次换人 | 气口 0.81~1.99s
+  轮间 1.0~3.0s | 复用 0 | 独立复算一致
+- 3D-Speaker+GTCRN：DER collar0.25 **7.66%**（miss 4.85 conf 2.81）/ strict 10.03%
+  | **6 标签/6 GT/6 全映射/无垃圾簇** | 每人均攒够独立簇（标签命中 77~98%，覆盖 86~99%）
+  ——核心考点"30 秒配角能否成簇"：6/6 全过（006-F 最低 77% 但簇独立）。
+- 听感台第 10 块（红框置顶）。json: out/bench/der_rotate_m30_c*.json

@@ -90,7 +90,96 @@ CLI 参数：
   （小文件含固定开销）；**完整 38min 原曲 147.9s，RTF ≈ 0.065**。全曲输出 6 标签
   519 段（`out/diar_full/`，GT 为 6 人 641 段——标签数巧合一致，准度待阶段2 DER）。
 
-## 5. 阶段2（正式评测）注意事项与建议
+## 5. EEND 分支核查（阶段2 第一件事，2026-09-18）
+
+结论：**3D-Speaker 仓库不存在可独立使用的 EEND 切分路径**；其宣传的"EEND 分支"
+就是 `--include_overlap` 里的 pyannote/segmentation-3.0（SincNet 分割模型），
+职责是**局部重叠语音检测**（帧级），与聚类分支对齐融合——不是"无缝换人切开"工具，
+且本环境无法运行。
+
+证据：
+1. 源码 `grep -ri eend` **零命中**（speakerlab/ egs/ runtime/ README 全无）。
+2. 官方发布文（阿里语音AI 2024-12《通义3D-Speaker多说话人日志功能》，
+   developer.aliyun.com/article/1647034 同源镜像 nxrte.com/jishu/54860.html）原文：
+   "EEND分支负责检测局部的 overlapping speaker……EEND采用来自于
+   pyannote/segmentation 开源的 SincNet 模型"。
+3. ModelScope 一体化卡片 `iic/speech_campplus_speaker-diarization_common` 自述
+   "基于分段-聚类（segmentation-clustering）模块化的通用说话人日志框架"。
+4. pyannote/segmentation-3.0 是 HF **gated 模型**（需账号接受协议+access token），
+   实测本机（代理可达 huggingface.co）返回 "Cannot access gated repo"——无 token 跑不通。
+5. ModelScope 另有独立 EEND 模型 `iic/speech_diarization_eend-ola-en-us-callhome-8k`
+   （EEND-OLA，ICASSP2023），但为**英文 8k callhome** 训练域，对中文 16k 会议域不匹配，
+   不纳入擂台赛。
+
+归因：**不存在（作为独立切分路径）+ 用法受限（overlap 分支需 HF token）**。
+正式评测只跑聚类分支。对核心诉求"两人无静音衔接也必须切开"：
+**聚类分支=同范式（VAD 切段），是改进而非根治**；EEND 类分割模型（pyannote
+segmentation 本体、EEND-EDA 系）值得列为后续单独调研对象，不在本擂台赛承诺内。
+
+## 6. 阶段2 正式评测结果（2026-09-18）
+
+DER 口径：scripts/der_eval.py（100ms 帧、GT 重叠按说话人帧、scipy 匈牙利最优映射、
+双 collar 档）。完整 json 在 out/bench/der_*.json。
+
+| 音频 | collar 0.25 | strict | miss/FA/conf (0.25) | 系统标签/GT人 |
+|---|---|---|---|---|
+| M_0m 5min 切片 | 26.21% | 27.56% | 24.9/0/1.3 | 2/6（自研基线同件 **12.3%**） |
+| M 全曲 38min | 29.24% | 34.23% | 25.9/0/3.3 | 6/6 |
+| L 全曲 39min | 17.83% | 21.47% | 16.6/0/1.2 | 7/7 |
+| splice6 拼接件（3D-Speaker） | 62.76% | 69.62% | 3.1/0/59.7 | 5/24 |
+| splice6 拼接件（自研基线） | 85.71% | 88.79% | 0/0/85.7 | 2/24 |
+
+要点：
+1. **5min 切片输给基线 2 倍**（26.2% vs 12.3%）。该件 GT 由两个主述者（001-M 156s、
+   006-F 130s）主导，系统估 2 人不算错，但 miss 25%（覆盖/边界侵蚀）远差于自研管线
+   的 VAD+短段策略。全曲 M 会 miss 同样 25.9%。
+2. **miss 主导、FA≈0、confusion 小**：3D-Speaker 的问题是"该切开的没切开/该覆盖的
+   没覆盖"，不是"乱报人"。与自研管线 VAD 漏检同类病灶。
+3. **拼接件**：DER 62.8% vs 基线 85.7%，是唯一明显胜出件但绝对值不可用；
+   有人声衔接的缝 3/3 全部跨缝合并（36/48/60s）——验证"聚类分支=同范式，
+   对无静音换人不能根治"。合并段长 1.6-3.2s（基线 3.1-5.3s）。
+4. 全曲 RTF：M 0.062 / L 0.068（官方标称 0.03；差异部分来自本机 WSL CPU）。
+5. 听感台：`out/bench/index.html`（5 块；拼接件红框高亮）。
+
+## 6A. 追加实验 A：无缝打散正面对决（2026-09-18）
+
+件：eval/shuffled/m_rr_gap0_s7（872s，6 人整句零间隙轮转，136 段 118 次换人，
+相邻静音 0——比拼接件更狠的密度）。
+
+| 系统 | collar 0.25 | strict | miss/conf | 标签 |
+|---|---|---|---|---|
+| 3D-Speaker | 36.01% | 38.25% | 34.6 / 1.4 | 3 |
+| 自研基线 | 52.58% | 52.78% | 5.5 / 47.1 | 1（全员并入陌生人1） |
+
+- 基线 replay meeting fb7e9ef3f895，运行时段 2026-09-18 11:10:35~11:26:35。
+- 换人点切开率 69%（82/118，74 段横跨换人点）；同尺同工具 3D-Speaker 胜 16.6pp。
+- 病灶对称：基线=切得开聚不动（conf 47%）；3D-Speaker=聚得准盖不住（miss 35%）。
+
+## 6B. 追加实验 B：降噪公平赛（2026-09-18）
+
+5min 切片经项目 GTCRN（preprocess.denoise_pcm）处理后给 3D-Speaker：
+
+| 版本 | collar 0.25 | strict | miss/conf |
+|---|---|---|---|
+| 生肉 | 26.21% | 27.56% | 24.9 / 1.3 |
+| GTCRN 降噪 | 4.77% | 6.33% | 3.5 / 1.3 |
+
+- miss -21.4pp，confusion 纹丝不动——收益全在 VAD 覆盖；结构（2 标签）不变。
+- 口径警示：自研基线同件 12.3% 是 replay_der 口径（10ms 无 collar），与 der_eval
+  collar0.25 不可直比；降噪版 strict 6.33% 与 replay_der 口径更接近，同降噪条件下
+  仍显著优于自研。
+- 补充（同尺复评）：基线 meeting 49385009f6fd 导出终版用 der_eval 复评 =
+  **8.86%（c0.25）/ 10.55%（strict）**，与 3D+GTCRN 4.77/6.33 同尺可比，
+  3D-Speaker 胜 ~4pp；基线结构=miss 更低(2.1 vs 3.5)、conf 更高(6.8 vs 1.3)。
+- 补充（全曲降噪赛）：M 全曲 9.71/14.79（生肉 29.24/34.23），L 全曲
+  4.88/8.32（生肉 17.83/21.47）；miss 全在崩塌式下降，标签数 6→7、7→8 轻微过聚。
+- 补充（冷知识核查）：**L 会与 M 会的 001-M 是同一人**（ERes2NetV2 cos=0.686>0.60；
+  005-F 跨会 cos=0.41 不同人；对照 0.18）。rotate40"双男声合并"是系统对了 GT 错了——
+  合并 001-M 进 GT 后 rotate40 修正 DER=**5.79%/6.97%**。
+- 补充（rotate_m30_s5 短裁判件）：M 原生 6 人×30s，240s；3D-Speaker+GTCRN
+  DER 7.66%/10.03%，6/6 标签 6/6 映射，每人 30s 全部攒够独立簇（命中 77~98%）。
+
+## 7. 阶段1 旧建议存档
 
 1. **评测要用全曲不要切 60s**：<40 段走 AHC 且 oracle 失效，60s 小窗结果严重失真；
    且官方自述 <30s 表现差。完整 5min 子段数 ≫40，才走谱聚类默认配置。
