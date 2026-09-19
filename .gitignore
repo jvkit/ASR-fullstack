@@ -33,3 +33,6 @@ eval/aishell4/test/wav/
 eval/aishell4/chunks/
 eval/aishell4/*.wav
 eval/shuffled/*.wav
+
+# 3D-Speaker 第三方源码（fetch_3dspeaker.sh 拉取，不入库）
+server/third_party/

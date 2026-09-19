@@ -394,3 +394,37 @@ DER 验证（M 会 300s 重放，GTCRN 降噪路径，replay_der 口径）：
   | **6 标签/6 GT/6 全映射/无垃圾簇** | 每人均攒够独立簇（标签命中 77~98%，覆盖 86~99%）
   ——核心考点"30 秒配角能否成簇"：6/6 全过（006-F 最低 77% 但簇独立）。
 - 听感台第 10 块（红框置顶）。json: out/bench/der_rotate_m30_c*.json
+
+## 换芯定裁：3D-Speaker 接入一期 A 阶段（2026-09-19，只新增文件，未改任何现有代码）
+
+### 依赖并入项目 venv（.venv，uv 管理；torch 保住 2.8.0+cpu）
+- 装法按 scd_bench README 踩坑指南：torchaudio 2.8.0 走 CPU 索引先装（与 torch 2.8 匹配）；
+  3D-Speaker requirements 的 numpy<1.24/sklearn==1.0.2 钉**未采用**（scd_bench 已证
+  numpy 2.2.6+sklearn 1.7.2 全通，生产 venv 也已是 numpy 2.2.6，不可降级）。
+- 清单：torchaudio 2.8.0+cpu、scipy、scikit-learn 1.7.2、tqdm、kaldiio、matplotlib、pandas、
+  openpyxl、pyannote-audio 4.0.7、fastcluster、umap-learn、hdbscan、modelscope[audio]
+  → modelscope 1.24.1 + funasr 1.4.16、addict、datasets。
+- 与 scd_bench 不同的坑：因 torchaudio 2.8.0+cpu 预装到位，modelscope[audio] 这次**没换**
+  torch（无 nvidia/triton 残留可清）；uv pip uninstall 空列表报 usage（无害）。
+- 装后核对：torch 2.8.0+cpu / torchaudio 2.8.0+cpu / numpy 2.2.6 未动；
+  app.core.preprocess.denoise_pcm 冒烟通过。
+
+### third_party 落位
+- server/scripts/fetch_3dspeaker.sh（代理 127.0.0.1:7897，死了直连；tarball 解压到
+  server/third_party/3D-Speaker/）。坑：校验用 `tar tzf | head` 在 pipefail 下吃 SIGPIPE
+  中断，改 `tar tzf > /dev/null`。
+- .gitignore 追加 server/third_party/（本次唯一改动的现有文件）。
+
+### wrapper server/app/core/diarize3ds.py（新文件）
+- diarize(pcm: bytes, sr=16000) -> [{start,end,cluster_id}]（秒）；懒加载单例；
+  sys.path 注入 third_party；MODELSCOPE_CACHE 默认 server/models/cache（setdefault）；
+  聚类参数模块常量 + TODO(B 阶段接 config.py)。docstring 写明来源/契约/限制(<40段AHC、
+  max_num_spks=15、无滑窗、CPU RTF≈0.06)。
+
+### 等价性验收（项目 venv 跑 wrapper，denoise_pcm 降噪，der_eval 同口径）
+| 件 | collar 0.25 | strict | scd_bench 目标 | 偏差 |
+|---|---|---|---|---|
+| rotate_m30_s5 | 7.66% | 10.03% | 7.66 / 10.03 | **+0.00pp 全等** |
+| M_R003S01C01_0m | 4.77% | 6.33% | 4.77 / 6.33 | **+0.00pp 全等** |
+- 输出 rttm：scd_bench/out/equiv/*.rttm；验收脚本 scd_bench/scripts/equiv_check_3ds.py
+  （两档 collar 各对各自目标，>1pp 报警）。
