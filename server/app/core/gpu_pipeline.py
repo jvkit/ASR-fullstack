@@ -1,7 +1,10 @@
-"""GPU 非实时一体化管线客户端（/meeting_chunk + /vad）。
+"""GPU 非实时一体化管线客户端（/meeting_chunk + /vad + /identify_segments）。
 
-/meeting_chunk: wav -> [{start,end,speaker,text}]（归一化+VAD+逐子段ASR+ER认人）
-/vad:          wav -> [[start_s, end_s], ...]（批次切点用）
+/meeting_chunk:      wav -> [{start,end,speaker,text}]（归一化+VAD+逐子段ASR+ER认人）
+                     —— 会中批次路径；会末终版自换芯一期 B 起不再使用
+/vad:                wav -> [[start_s, end_s], ...]（批次切点用）
+/identify_segments:  wav + 外部切段 -> [{start,end,cluster_id,speaker,text}]
+                     —— 会末 3D-Speaker 分离结果的认人+转写（B 阶段新，唯一生产会末路径）
 """
 
 from __future__ import annotations
@@ -88,4 +91,47 @@ async def meeting_chunk(pcm: bytes, hotwords: str = "", timeout_sec: float | Non
             return j.get("segs", []), j.get("anon", [])
     except Exception:
         logger.exception("meeting_chunk failed")
+        return None
+
+
+async def identify_segments(pcm: bytes, segments: list[dict], hotwords: str = "",
+                            timeout_sec: float | None = None,
+                            name_threshold: float | None = None) -> list[dict] | None:
+    """会末 3D-Speaker 分离结果 → GPU 认人 + 转写（换芯一期 B，唯一生产会末路径）。
+
+    pcm: 已过 preprocess.denoise_pcm 的 int16/16k/mono 音频（降噪在本地完成，
+    与 GPU /meeting_chunk 的会中处理域一致）。
+    segments: diarize3ds.diarize 的输出 [{start, end, cluster_id}]（秒）。
+    一次 HTTP 批量传整段 wav + 全部边界，GPU 逐段 ASR（热词/标点/ITN 复用现有
+    模型）+ 逐簇 ERes2NetV2 对声纹库认人（匈牙利一对一，未命中标"说话人N"）。
+
+    返回 [{start, end, cluster_id, speaker, text}]（start/end 秒，与输入对齐）；
+    GPU 不可用/失败返回 None（调用方按终版失败处理，不得回退旧聚类）。
+    """
+    try:
+        thr = name_threshold if name_threshold and 0 < name_threshold < 1 \
+            else settings.reannotate_name_threshold
+        data = {
+            "segments": json.dumps(
+                [[float(s["start"]), float(s["end"]), int(s["cluster_id"])] for s in segments]
+            ),
+            "name_threshold": str(thr),
+            "hw_weight": str(settings.pipeline_hw_weight),
+            "punc": "true" if settings.pipeline_punc_enabled else "false",
+            "itn": "true" if settings.pipeline_itn_enabled else "false",
+        }
+        if hotwords:
+            data["hotwords"] = hotwords
+        async with httpx.AsyncClient(
+            timeout=timeout_sec or settings.identify_segments_timeout_sec
+        ) as cli:
+            r = await cli.post(
+                f"{settings.diarize_http_url}/identify_segments",
+                files={"file": ("meeting.wav", pcm_to_wav(pcm), "audio/wav")},
+                data=data,
+            )
+            r.raise_for_status()
+            return r.json().get("segs", [])
+    except Exception:
+        logger.exception("identify_segments failed")
         return None

@@ -17,9 +17,8 @@ app.core.preprocess.denoise_pcm 处理——本 wrapper 不做降噪，保持职
 - 无滑窗，整段输入整段聚类；长会议建议按场调用（会末终版场景）
 - CPU 推理，38min 会议约 2.5min（RTF≈0.06）
 
-TODO(B 阶段)：聚类参数（cluster_type/mer_cos/min_cluster_size/max_num_spks/pval 等）与
-MODELSCOPE_CACHE 现走本模块常量/环境默认，接入 app.config.py 统一管理；reannotate 与
-GPU diarize 端点接线同属 B 阶段（待救援 AI 完工后动工）。
+聚类参数（B 阶段起）统一在 app.config.py diar3ds_* 管理，默认值与 scd_bench
+评测/等价性验收一致；本模块只做 config → CommonClustering 的接线。
 """
 from __future__ import annotations
 
@@ -35,16 +34,6 @@ if str(_THIRDPARTY) not in sys.path:
 # 模型缓存重定向（server/models/cache），不覆盖外部既有设定
 os.environ.setdefault("MODELSCOPE_CACHE", str(_SERVER_ROOT / "models" / "cache"))
 
-# TODO(B 阶段): 接入 app.config.py。现沿用 3D-Speaker 官方默认（与 scd_bench 评测一致）。
-CLUSTER_PARAMS = {
-    "cluster_type": "spectral",
-    "mer_cos": 0.8,          # 簇心 cos≥0.8 再合并
-    "min_num_spks": 1,
-    "max_num_spks": 15,      # 选 k 上限
-    "min_cluster_size": 4,   # ≤4 段的簇重指派到最近大簇
-    "oracle_num": None,
-    "pval": 0.012,
-}
 DEVICE = "cpu"
 
 _pipeline = None
@@ -53,9 +42,24 @@ _pipeline = None
 def _get_pipeline():
     global _pipeline
     if _pipeline is None:
+        from app.config import settings
         os.makedirs(os.environ["MODELSCOPE_CACHE"], exist_ok=True)
         from speakerlab.bin.infer_diarization import Diarization3Dspeaker
         _pipeline = Diarization3Dspeaker(device=DEVICE)
+        # 聚类参数接线（app.config diar3ds_*，B 阶段）：直接覆写 CommonClustering
+        # 实例的谱聚类/短段分支与后处理参数——3D-Speaker 的 Diarization3Dspeaker
+        # 构造器不暴露这些旋钮，官方脚本也只在 conf dict 里写死。
+        cl = _pipeline.cluster
+        cl.cluster_type = settings.diar3ds_cluster_type
+        cl.cluster_line = settings.diar3ds_cluster_line
+        cl.mer_cos = settings.diar3ds_mer_cos
+        cl.min_cluster_size = settings.diar3ds_min_cluster_size
+        if settings.diar3ds_cluster_type == "spectral":
+            cl.cluster.min_num_spks = settings.diar3ds_min_num_spks
+            cl.cluster.max_num_spks = settings.diar3ds_max_num_spks
+            cl.cluster.pval = settings.diar3ds_pval
+            cl.cluster.k = settings.diar3ds_oracle_num or None
+        _pipeline.speaker_num = settings.diar3ds_oracle_num or None
     return _pipeline
 
 

@@ -1,12 +1,17 @@
-"""会末重标注：会议录音全场重跑 /meeting_chunk 一体化管线 → utterances_re 权威终版。
+"""会末重标注：3D-Speaker 分离 + GPU 认人/转写 → utterances_re 权威终版。
 
-非实时批次架构下，会议中批次（utterances 表）与终版用的是同一个 GPU 端点：
-    归一化 → fsmn VAD 切句 → SeACo Paraformer 逐子段转写 → ERes2NetV2 逐句声纹命名
-区别只在输入范围：批次喂 8~15s 增量，终版喂全场录音，结果天然更准
-（边界完整、说话人上下文充分）。
+换芯一期 B（2026-09-20）起唯一生产会末路径：
+    原始 PCM → preprocess.denoise_pcm（本地 GTCRN）→ diarize3ds.diarize（本地
+    FSMN VAD + CAM++ 嵌入 + 谱聚类，出匿名分段）→ GPU /identify_segments
+    （逐段 SeACo ASR[热词/标点/ITN] + 逐簇 ERes2NetV2 声纹库认人）
+    → ReAnnotateUtterance 落库
 
-不再依赖会议中的句子边界/字级时间戳（实时版已砍掉，paraformer 离线转写
-不给字级时间戳；逐子段 ASR 让文字与子段时间天然一一对应）。
+旧路径（meeting_chunk 一体化自研 VAD+匿名聚类）不再被会末使用，代码保留于
+gpu_pipeline.meeting_chunk 供会中批次与回滚（见 AGENTS.md §5）。任一环节失败
+= 终版失败（返回 False），绝不静默回退旧聚类。
+
+不再依赖会议中的句子边界/字级时间戳（paraformer 离线转写不给字级时间戳；
+逐段 ASR 让文字与段边界天然一一对应）。
 """
 
 from __future__ import annotations
@@ -17,10 +22,9 @@ import logging
 import wave
 from pathlib import Path
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete
 
 from app.config import settings, load_hotwords
-from app.core.gpu_pipeline import meeting_chunk
 from app.db.database import SessionLocal
 from app.db.models import Meeting, ReAnnotateUtterance
 
@@ -31,16 +35,16 @@ async def reannotate(
     meeting_id: str,
     pcm: bytes,
     name_threshold: float | None = None,
-    timeout_sec: float = 600,
+    timeout_sec: float | None = None,
     anon_clusters: list | None = None,
     anon_next: int = 1,
 ) -> bool:
     """会末重标注主入口（session.stop 里 asyncio.create_task 调用）。失败仅记日志。
 
-    name_threshold: 声纹匹配阈值（None=用 config 默认 reannotate_name_threshold，
-    与会议中批次共用一个旋钮）。
-    timeout_sec: 全场重跑超时（长会议单块处理分钟级，默认 600s 远大于批次的 120s）。
-    anon_clusters/anon_next: 会议中累积的匿名簇状态（陌生人N 全场重跑时保持一致）。
+    name_threshold: 声纹匹配阈值（None=用 config 默认 reannotate_name_threshold）。
+    timeout_sec: GPU /identify_segments 超时（None=用 config identify_segments_timeout_sec）。
+    anon_clusters/anon_next: 兼容旧签名保留（3D-Speaker 每场独立聚类，匿名编号
+    每场归零，不再消费会议中累积的匿名簇状态）。
     返回是否产出终版（太短/失败返回 False）。
     """
     try:
@@ -48,17 +52,29 @@ async def reannotate(
             logger.info("reannotate skip %s: too short", meeting_id)
             return False
 
-        thr = name_threshold if name_threshold and 0 < name_threshold < 1 \
-            else settings.reannotate_name_threshold
-        hotwords = load_hotwords().replace(",", " ")
-        res = await meeting_chunk(pcm, hotwords, timeout_sec=timeout_sec,
-                                  anon_clusters=anon_clusters, anon_next=anon_next,
-                                  final=True)
-        if res is None:
-            logger.error("reannotate %s: meeting_chunk failed", meeting_id)
+        from app.core.diarize3ds import diarize
+        from app.core.gpu_pipeline import identify_segments
+        from app.core.preprocess import denoise_pcm
+
+        # 1) 本地 GTCRN 降噪（推理副本；原始存档不受影响）
+        pcm = denoise_pcm(pcm)
+
+        # 2) 本地 3D-Speaker 分离（CPU，长会议分钟级）
+        segments = diarize(pcm, sr=16000)
+        logger.info("reannotate %s: 3ds diarize done, %d segs", meeting_id, len(segments))
+        if not segments:
+            logger.error("reannotate %s: 3ds produced no segments", meeting_id)
             return False
-        segs, _anon = res
-        logger.info("reannotate %s: %d segs", meeting_id, len(segs))
+
+        # 3) GPU 认人 + 转写（一次 HTTP 批量：整段 wav + 全部边界）
+        hotwords = load_hotwords().replace(",", " ")
+        segs = await identify_segments(pcm, segments, hotwords, timeout_sec=timeout_sec,
+                                       name_threshold=name_threshold)
+        if segs is None:
+            logger.error("reannotate %s: identify_segments failed, final version aborted "
+                         "(no fallback to legacy pipeline)", meeting_id)
+            return False
+        logger.info("reannotate %s: gpu identified %d segs", meeting_id, len(segs))
 
         async with SessionLocal() as db:
             await db.execute(

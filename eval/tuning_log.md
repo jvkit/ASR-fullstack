@@ -428,3 +428,51 @@ DER 验证（M 会 300s 重放，GTCRN 降噪路径，replay_der 口径）：
 | M_R003S01C01_0m | 4.77% | 6.33% | 4.77 / 6.33 | **+0.00pp 全等** |
 - 输出 rttm：scd_bench/out/equiv/*.rttm；验收脚本 scd_bench/scripts/equiv_check_3ds.py
   （两档 collar 各对各自目标，>1pp 报警）。
+
+## 换芯一期 B：3D-Speaker 会末生产接线（2026-09-20，用户拍板唯一生产路径）
+
+### 变更
+- 本地（**未 commit**，按任务要求交由用户审后提交）：
+  - `server/app/config.py`：新增 `diar3ds_*` 聚类参数组（cluster_type/mer_cos/min_num_spks/
+    max_num_spks/min_cluster_size/cluster_line/pval/oracle_num，默认= scd_bench 评测值）+
+    `identify_segments_timeout_sec=900`。
+  - `server/app/core/diarize3ds.py`：删模块常量 CLUSTER_PARAMS，聚类参数从 config 读取，
+    `_get_pipeline` 构造后覆写 CommonClustering 实例（谱聚类分支 + mer_cos + cluster_line）。
+  - `server/app/core/gpu_pipeline.py`：新增 `identify_segments()` 客户端——一次 HTTP 批量
+    （整段 wav + segments JSON），Form 参数 name_threshold/hotwords/hw_weight/punc/itn 全透传。
+  - `server/app/core/reannotate.py`：会末终版切新流程 denoise_pcm → diarize3ds.diarize →
+    GPU /identify_segments → ReAnnotateUtterance；失败=终版失败，**不回退旧聚类**；
+    anon_clusters/anon_next 签名保留但不再消费（3ds 每场独立聚类）。
+  - `server/scripts/verify_3ds_flow.py`：新流程冒烟脚本（新增文件）。
+- GPU（**commit 83cf988**，diarize_svc/service.py +142 行，旧端点零改动）：
+  新增 `POST /identify_segments(file=wav, segments=[[s,e,cid],...], name_threshold,
+  hotwords, hw_weight, punc, itn)` → `{segs:[{start,end,cluster_id,speaker,text}],
+  n_clusters, registered}`。认人=簇级（簇内段时长加权 ER 质心）对 speaker_enrolls 多段
+  质心匈牙利一对一 + name_threshold 门，未命中按簇首次出现顺序编"说话人N"；空库全匿名。
+  转写=逐段 SeACo（热词+标点+ITN），与 /meeting_chunk 同一套模型实例。
+
+### 测试
+- 导入检查：config/gpu_pipeline/reannotate/diarize3ds 全通过。
+- GPU 服务重启（先杀监督器再杀 uvicorn，两条命令）+ health OK；meeting_chunk 预热 200。
+- 新流程冒烟（60s M 会头切片 eval/verify_3ds_b/M_0m_head60s.wav，声纹库=盲测空库态）：
+  `cd server && ../.venv/bin/python scripts/verify_3ds_flow.py ../eval/verify_3ds_b/M_0m_head60s.wav`
+  结果：**[OK] 新流程验证通过**——3ds 4 段/2 簇（0-0.94 c1 / 4.06-6.68 c0 /
+  6.68-14.18 c1 / 14.18-59.98 c0），GPU identify 200，4/4 段有文字，
+  speakers=[说话人1, 说话人2]（空库全匿名，符合预期）。全程 112s（含首次模型
+  加载 ~75s；二次跑 diarize 仅 ~8s）。
+- 失败路径：diarize_http_url 指向不可达地址 → identify_segments 返回 None，
+  reannotate 返回 False，无旧聚类回退。
+- 全链路 DB 写入（reannotate 临时 meeting_id verify3dsb_tmp）：utterances_re 4 行
+  （seq/speaker/start_ms/end_ms/text 齐全），验证后自清（自建自清，不碰他人数据）。
+- 后端 8010 重启（旧进程无新 config 字段会 AttributeError）+ /api/config 200。
+
+### 协议要点
+- 段边界单位=秒；cluster_id=3ds 匿名标签（每场从 0 起）；speaker=注册名或"说话人N"。
+- GPU 侧对上传 wav 做 RMS 归一化（与 /meeting_chunk 同域）后再切段/认人。
+- 长会议：本地 3ds CPU RTF≈0.06（38min≈2.5min），GPU 逐段 ASR 分钟级 → 超时 900s。
+
+### 剩余风险 / 待办
+- 60s 切片走 AHC 短段分支（<40 子段）——人数估计不可靠为已知限制（完整会议不受影响）。
+- 完整 AISHELL-4 盲测重放 + replay_der 的终版 DER 尚未跑（本任务只做冒烟验证，盲测
+  需重置声纹库状态，属用户调度）；跑后在此记录终版 DER 对比（旧基线 12.3%）。
+- 匿名编号语义变化：会末不再延续会中"陌生人N"编号（每场归零，且簇=人数优先）。

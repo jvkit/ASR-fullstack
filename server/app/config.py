@@ -58,8 +58,8 @@ class Settings(BaseSettings):
     pipeline_hw_weight: float = 0.1
 
     # 降噪预处理层（2026-09-17 降噪决赛当选：西工大 GTCRN，DNS3 权重）。
-    # 集中处理：meeting_chunk（会中批次+会末重标注）与声纹注册/识别统一走 preprocess.denoise_pcm；
-    # 原始 PCM 存档不受影响，关闭即回到未降噪链路。
+    # 集中处理：会末 3D-Speaker 分离、GPU 声纹注册/识别、会中批次统一走
+    # preprocess.denoise_pcm；原始 PCM 存档不受影响，关闭即回到未降噪链路。
     denoise_enabled: bool = True
     denoise_model_path: str = "models/gtcrn_dns3.tar"  # 相对 server/ 目录
 
@@ -71,6 +71,23 @@ class Settings(BaseSettings):
     # miss 不变 43s——收紧的代价在噪声内）
     reannotate_name_threshold: float = 0.40
     reannotate_min_sec: int = 10          # 短于此秒数不做重标注
+
+    # ---------- 会末说话人分离：3D-Speaker（换芯一期 B，2026-09-20） ----------
+    # 唯一生产会末分离路径：会末完整录音 → 本地 GTCRN → diarize3ds.diarize 出匿名分段
+    # → GPU /identify_segments 逐段 ERes2NetV2 认人 + SeACo 转写。
+    # 旧自研 VAD+匿名聚类（/meeting_chunk）不再作为会末生产路径，代码保留用于会中批次
+    # 与回滚（见 AGENTS.md §5）。此处参数对应 3D-Speaker CommonClustering，默认值与
+    # scd_bench 评测/等价性验收（rotate_m30 7.66%、M5min 4.77%）完全一致。
+    diar3ds_cluster_type: str = "spectral"
+    diar3ds_mer_cos: float = 0.8          # 簇心 cos≥此值再合并
+    diar3ds_min_num_spks: int = 1
+    diar3ds_max_num_spks: int = 15        # 谱聚类选 k 上限（>15 人场景不可用）
+    diar3ds_min_cluster_size: int = 4     # ≤此段数的簇重指派到最近大簇
+    diar3ds_cluster_line: int = 40        # 子段数 < 此值走 AHC 短段分支（谱聚类参数不生效）
+    diar3ds_pval: float = 0.012           # 相似度矩阵剪枝阈值
+    diar3ds_oracle_num: int = 0           # 0=不指定人数（自动估 k）；>0 强制人数
+    # /identify_segments 超时：长会议逐段 CPU ASR 分钟级，给足余量
+    identify_segments_timeout_sec: float = 900
 
     # LLM（内网 vLLM / mymodule 网关）
     llm_base_url: str = "http://127.0.0.1:4000/v1"
