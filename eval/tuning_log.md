@@ -476,3 +476,26 @@ DER 验证（M 会 300s 重放，GTCRN 降噪路径，replay_der 口径）：
 - 完整 AISHELL-4 盲测重放 + replay_der 的终版 DER 尚未跑（本任务只做冒烟验证，盲测
   需重置声纹库状态，属用户调度）；跑后在此记录终版 DER 对比（旧基线 12.3%）。
 - 匿名编号语义变化：会末不再延续会中"陌生人N"编号（每场归零，且簇=人数优先）。
+
+## 换芯一期 B 验收门禁（2026-09-20，replay 走完整生产管线后 der_eval 评分）
+
+口径：replay_wav.py 走真实管线（含降噪/批次/终版）→ 终版导出 rttm →
+**scd_bench/scripts/der_eval.py**（项目标准口径，双 collar）。生产终版段边界
+与直驱基准逐段一致（rotate_m30 49/49 段 0 偏差）。
+
+**口径警示**：replay_der.py（10ms 无 collar、GT 静音帧计 FA）与 der_eval
+（md-eval 标准，无参考单位帧跳过）不可直比——同一段集 replay_der 15.4% vs
+der_eval 10.03%，差 5.4pp 全在口径。验收一律以 der_eval 为准。
+
+| 件 | meeting_id | 终版段数 | 标签/GT 人 | DER c0.25 / strict | 基准（直驱） | 结论 |
+|---|---|---|---|---|---|---|
+| M5min（M_R003S01C01_0m 前 300s） | 72713e96644a | 46 段 | 2/6（切片只 2 主述者） | **4.77 / 6.33** | 4.77 / 6.33 | 0.00pp ✅ |
+| rotate_m30_s5（6人×30s 轮转） | dc8e6341af9b | 49 段 | 6/6 全映射 | **7.66 / 10.03** | 7.66 / 10.03 | 0.00pp ✅ |
+| rotate40_s3（跨会 6 人，2400s） | f719160f598e | 218 段 | 6 标签/6 GT（001-M+L_001-M 合并=正确，GT 拆两人） | 19.93 / 20.94（修正 GT 后 **5.79**） | 同左 | 0.00pp ✅ |
+
+- 三件全部过门禁：生产链路与评测链路完全等价，DER 偏差 0.00pp（门禁 ≤2pp）。
+- rotate40 的 19.93% 与首测一致：双男声合并（声纹验证同人，GT 错了），修正后 5.79%。
+- 明细：eval/<meeting_id>/{replay_der.txt, prod_re.rttm}（prod_re 用 der_eval 复评命令
+  在 tuning_log §门禁本节）。
+- 病灶记录：生产链路 miss/FA/conf 与直驱逐项相同（M5min miss 4.25 FA 0 conf 2.07；
+  rotate_m30 miss 6.83 FA 0 conf 3.2）——接入零失真。
