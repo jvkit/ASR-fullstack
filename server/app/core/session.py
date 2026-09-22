@@ -42,7 +42,6 @@ class MeetingSession:
         self.replay_done = asyncio.Event()  # 重放音频喂完置位（供 ws 循环感知自动结束）
         self.clients: set[WebSocket] = set()
         self.buffer = UtteranceBuffer()
-        self.summary_seq = 0
         self._stopped = False
         self._lock = asyncio.Lock()
 
@@ -130,20 +129,19 @@ class MeetingSession:
                 if self._processed == before:
                     break  # 失败重试无进展（连续失败 3 次后丢弃），防死循环
 
-            rolling_summary = await self.enhancer.finish()
-
-            # 会末总结：优先用滚动纪要（已纠错、信息密度高），全文太长时纪要兜底更稳
-            full_text = await self.buffer.full_text()
-            final_input = full_text
-            if len(full_text) > 6000 and rolling_summary:
-                final_input = rolling_summary
-            result = await llm_client.extract_final_attributes(final_input)
+            # 会末总结：输入 = 全部段纪要拼接（不含原始转写全文）。
+            # 旧实现在此有「全文 >6000 字就丢掉全文、只用滚动摘要」的硬兜底——
+            # 现已不需要：段纪要归约本身就是分层压缩，输入规模 = 波数 × 每波纪要，
+            # 与会议原始文本量解耦（6h 会议约 94k token，chat 模型 256k 窗口内）。
+            segments_text = await self.enhancer.finish()
+            result = await llm_client.extract_final_attributes(segments_text)
 
             final_title = result["title"]
             # 重放测试会议：标题保留「重放测试」标记（LLM 生成标题后仍追加，便于区分）
             if (self.replay_of or self.client_replay) and final_title and "重放测试" not in final_title:
                 final_title = f"{final_title}（重放测试）"
-            final_summary = result["summary"] or rolling_summary
+            # LLM 失败兜底：直接用段纪要拼接当总结（信息全在，只是没归约）
+            final_summary = result["summary"] or segments_text
             final_tags = result["tags"][:settings.final_tags_count]
             # 属性：滚动提取的 + 会末提取的合并（key 去重，滚动版优先）
             merged: dict[str, str] = {}
@@ -167,14 +165,17 @@ class MeetingSession:
                         )
                     await db.commit()
 
-            # 滚动纪要作为最终总结落一条 Summary（可审计、供报告导出）
+            # 会末大总结落一条 Summary（可审计、供报告导出）。
+            # **seq=0 是终版专用号**：段纪要是 1..N，故不撞号，且 order_by(seq) 让
+            # 终版排在最前（先总结后分章，前端 MeetingDetail 也是按 seq===0 认终版）。
+            # 旧实现用 session 自有的 summary_seq（从 0 起 +1 → 永远是 1），既与第一段
+            # 纪要撞号，也让前端的 seq===0 判断从未生效。
             if final_summary:
-                self.summary_seq += 1
                 async with SessionLocal() as db:
                     db.add(Summary(
                         meeting_id=session_id,
-                        seq=self.summary_seq,
-                        window_text="",
+                        seq=0,
+                        window_text="",   # 终版输入是段纪要，不是原文窗口
                         content=final_summary,
                         action_items="[]",
                         attributes="[]",
@@ -183,7 +184,7 @@ class MeetingSession:
                     await db.commit()
                 await self.broadcast({
                     "type": "summary",
-                    "seq": self.summary_seq,
+                    "seq": 0,
                     "final": True,
                     "title": final_title or "最终总结",
                     "points": [p.lstrip("· ").strip() for p in final_summary.splitlines() if p.strip()],

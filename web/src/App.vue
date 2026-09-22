@@ -83,16 +83,22 @@ function handleMessage(msg: ServerMessage) {
       }
       break
     }
-    case 'summary':
-      summaries.value.push({
+    case 'summary': {
+      // 按 seq upsert：段纪要可被下一波订正（服务端会重发同 seq），
+      // 无脑 push 会让订正显示成重复条目
+      const row = {
         seq: msg.seq,
         title: msg.title,
         points: msg.points,
         actionItems: msg.action_items as SummaryItem['actionItems'],
         attributes: msg.attributes as SummaryItem['attributes'],
         final: msg.final,
-      })
+      }
+      const si = summaries.value.findIndex((s) => s.seq === msg.seq && s.final === msg.final)
+      if (si >= 0) summaries.value[si] = row
+      else summaries.value.push(row)
       break
+    }
     case 'attributes':
       liveAttrs.value = msg.attributes || []
       break

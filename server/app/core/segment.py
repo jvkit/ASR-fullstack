@@ -117,15 +117,6 @@ class UtteranceBuffer:
         want = set(seqs)
         return [it for it in self._all if it.seq in want]
 
-    async def recent_summary_hint(self) -> str:
-        """最近一次总结要点（纠错时给 LLM 当全局上下文）。"""
-        # 由 session 注入（避免循环引用），返回缓存的 prev_summary
-        hint = getattr(self, "_summary_hint", "")
-        return str(hint)
-
-    def set_summary_hint(self, hint: str) -> None:
-        self._summary_hint = hint
-
     async def drain_text(self, max_chars: int) -> str:
         """取走并格式化为「说话人: 内容」，超出 max_chars 的部分留下次。"""
         items = await self.drain()

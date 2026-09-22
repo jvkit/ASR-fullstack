@@ -41,43 +41,16 @@ client = OpenAI(
 )
 
 
-async def summarize_window(prev_summary: str, window_text: str) -> dict:
-    """总结一个窗口的转写文本。
+async def extract_final_attributes(segments_text: str) -> dict:
+    """会议结束时对【各波段纪要】提取主题 + 完整总结 + 标签 + 动态属性。
 
-    返回 {"title": str, "points": list[str], "action_items": list[dict], "attributes": list[dict]}
-    解析失败时返回兜底结构，绝不向上抛异常（总结不能打断会议）。
-    """
-    messages = prompts.build_summary_messages(prev_summary, window_text)
-    try:
-        # openai SDK 是同步阻塞调用，丢线程池防止卡住事件循环
-        resp = await asyncio.to_thread(
-            client.chat.completions.create,
-            model=settings.llm_model,
-            messages=messages,  # type: ignore[arg-type]
-            temperature=0.2,
-            response_format={"type": "json_object"},
-        )
-        raw = resp.choices[0].message.content or "{}"
-        data = json.loads(raw)
-        return {
-            "title": str(data.get("title", "")),
-            "points": [str(p) for p in data.get("points", [])],
-            "action_items": data.get("action_items", []),
-            "attributes": data.get("attributes", []),
-        }
-    except Exception:
-        logger.exception("summarize_window failed")
-        return {"title": "", "points": [], "action_items": [], "attributes": []}
-
-
-async def extract_final_attributes(full_text: str) -> dict:
-    """会议结束时对全文提取主题 + 完整总结 + 标签 + 动态属性（事实性）。
-
+    segments_text 是全部段纪要的拼接（不是原始转写全文）——会末总结只看段纪要，
+    故输入规模 = 波数 × 每波纪要，与会议时长的原始文本量解耦。
     返回 {"title": str, "summary": str, "tags": list[str], "attributes": list[{"key","value"}]}
     """
-    if not full_text.strip():
+    if not segments_text.strip():
         return {"title": "", "summary": "", "tags": [], "attributes": []}
-    messages = prompts.build_final_attributes_messages(full_text)
+    messages = prompts.build_final_attributes_messages(segments_text)
     try:
         resp = await asyncio.to_thread(
             client.chat.completions.create,
@@ -99,13 +72,9 @@ async def extract_final_attributes(full_text: str) -> dict:
         return {"title": "", "summary": "", "tags": [], "attributes": []}
 
 
-def build_correction_messages(context: str, summary: str, window_text: str) -> list[dict]:
-    """纠错提示词构造（保持 prompts 单点维护）。"""
-    return prompts.build_correction_messages(context, summary, window_text)
-
-
-def build_enhance_messages(summary: str, prev_lines: list[tuple[str, str]],
+def build_enhance_messages(ctx_summaries: list[str], prev_summary: str,
+                           prev_lines: list[tuple[str, str]],
                            cur_lines: list[tuple[str, str]]) -> list[dict]:
-    """合并调用（纠错+修正上轮+滚动纪要）提示词构造（供 enhancer 每批调用）。"""
-    return prompts.build_enhance_messages(summary, prev_lines, cur_lines)
+    """一波一次合并调用（纠错本波 + 订正上一波文本/纪要 + 出本波段纪要）的提示词构造。"""
+    return prompts.build_enhance_messages(ctx_summaries, prev_summary, prev_lines, cur_lines)
 

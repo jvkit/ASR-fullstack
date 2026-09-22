@@ -201,8 +201,9 @@ async def meeting_report(meeting_id: str) -> dict:
 
         all_actions: list[dict] = []
         for s in summaries:
-            if s.title:
-                parts.append(f"## {s.seq}. {s.title}\n")
+            # seq=0 是会末终版（排在最前，先总结后分章）；1..N 是各波段纪要
+            heading = "最终总结" if s.seq == 0 else f"{s.seq}. {s.title or f'第 {s.seq} 段'}"
+            parts.append(f"## {heading}\n")
             parts.append(s.content + "\n")
             all_actions.extend(json.loads(s.action_items or "[]"))
 

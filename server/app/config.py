@@ -16,8 +16,14 @@ class Settings(BaseSettings):
     # ERes2NetV2 认人；声纹注册/列表/删除/检测全部走这里，唯一权威库）
     diarize_http_url: str = "http://192.168.30.87:10096"
     pipeline_tick_sec: float = 4.0          # 批次调度检查间隔
-    pipeline_batch_min_sec: float = 8.0     # 攒够这么多音频才尝试成批（VAD 句尾切点）
-    pipeline_batch_max_sec: float = 15.0    # 超过强制硬切（防长句/长静音拖死批次）
+    # L1 批次（ASR + 说话人标签，走 GPU 不碰 LLM 网关）：30s 下限 / 45s 硬切。
+    # 2026-09-21 由 8/15 放大：转写准确度与批次大小解耦（GPU 内部 FSMN VAD 按
+    # max_end_silence_ms 切句 + SeACo 逐子段离线转写，30s 与 8s 看到的子段相同）；
+    # 放大只影响会中匿名聚类质量（批内段数更多更稳，但会末 3D-Speaker 全场重跑
+    # 会覆盖，会中标签本就是草稿）。代价：GPU duty cycle 57%（实测 30s 音频约
+    # 17s），容错余量小于 8s 批次，跟不上就退回 45/60。
+    pipeline_batch_min_sec: float = 30.0    # 攒够这么多音频才尝试成批（VAD 句尾切点）
+    pipeline_batch_max_sec: float = 45.0    # 超过强制硬切（防长句/长静音拖死批次）
     pipeline_chunk_timeout_sec: float = 120  # /meeting_chunk 超时（实测 30s 音频约 17s）
     pipeline_vad_timeout_sec: float = 30    # 批次切点 VAD 超时
     pipeline_vad_max_end_silence_ms: int = 250  # VAD 句尾静音判停阈值。
@@ -89,17 +95,33 @@ class Settings(BaseSettings):
     # /identify_segments 超时：长会议逐段 CPU ASR 分钟级，给足余量
     identify_segments_timeout_sec: float = 900
 
+    # ---------- L2 波段纪要（2026-09-21 改：段纪要不再累计改写） ----------
+    # 一波 = summary_every_n_batches 个 L1 批次（按批次计数驱动，不用墙上时钟，
+    # 避免 VAD 切点浮动导致时间窗漂移）。每波一次 LLM 调用同时干三件事：
+    # 纠错本波 + 订正上一波 + 出本波段纪要（标题/要点/待办）。
+    # 旧设计（每批改写同一份 3-8 条滚动纪要）已废：40min 与 6h 会议输出同样
+    # 一小段，长会议信息必然丢失。现在每波独立成段、append 不覆盖，会末大总结
+    # 由全部段纪要归约而来（不碰原始全文，故窗口与时长解耦）。
+    summary_every_n_batches: int = 4        # 每 4 个 L1 批次触发一波（30s×4 ≈ 2min）
+    summary_context_segments: int = 5       # 每波带前 5 波纪要做上下文（滑动窗口，防漂移）
+    # 会议结束时不足一波的尾巴强制跑一次（否则最后 1-2 分钟永不纠错、不进纪要）
+    summary_flush_tail: bool = True
+
     # LLM（内网 vLLM / mymodule 网关）
     llm_base_url: str = "http://127.0.0.1:4000/v1"
     llm_api_key: str = ""
-    llm_model: str = "chat"
+    llm_model: str = "chat"          # 256k 上下文；网关另有 new(1M)，6h 会议
+                                     # 会末输入约 94k token，chat 足够，不占 1M 模型
     llm_timeout_sec: int = 300
     llm_correction_enabled: bool = True   # 批次文字纠错开关
 
-    # 批次 LLM 增强（每批完成后触发：修正上轮 + 纠错本轮 + 滚动纪要）
+    # 波段 LLM 增强（每波一次调用：纠错本波 + 订正上一波 + 出本波段纪要）
     # 实测内网网关同请求延迟 19s~230s 波动（共享 vLLM 排队），45s 会导致
     # 会上纠错批量超时死亡（日志 CancelledError、原文永不纠正）——放宽到 300s，
-    # 宁可纪要滞后也不丢纠错；批次在飞期间自动合并，不丢批。
+    # 宁可纪要滞后也不丢纠错；波在飞期间新批次自动累积，不丢批。
+    # 单次调用输入恒定 ≈4.2k token（5 波纪要 + 2 波原文），与会议时长无关。
+    # 失败不兜底（2026-09-21 用户决定）：某波 LLM 失败即记日志跳过，该波无段纪要、
+    # 文字留草稿态；下一波仍会拿到本波原文（2 波窗口），纠错自动延后一波补上。
     roll_llm_timeout_sec: float = 300
 
     # Langfuse
