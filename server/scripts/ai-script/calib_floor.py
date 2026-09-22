@@ -9,6 +9,7 @@
 用法:
   cd server && ../.venv/bin/python scripts/ai-script/calib_floor.py
 """
+import os
 import re
 import sys
 import wave
@@ -19,7 +20,8 @@ import numpy as np
 import requests
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
-GPU = "http://192.168.30.87:10096"
+# GPU IP 会变（2026-09-22 → 172.16.16.120）；与 config.py 的 DIARIZE_HTTP_URL 同源
+GPU = os.environ.get("DIARIZE_HTTP_URL", "http://172.16.16.120:10096")
 ROOT = Path(__file__).resolve().parents[3]  # meeting-asr/
 AISHELL = ROOT / "eval/aishell4/test"
 MEETINGS = ["M_R003S01C01", "M_R003S02C01", "M_R003S04C01"]

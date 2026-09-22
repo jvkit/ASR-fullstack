@@ -27,6 +27,7 @@ from __future__ import annotations
 import argparse
 import io
 import json
+import os
 import re
 import wave
 from pathlib import Path
@@ -34,7 +35,9 @@ from pathlib import Path
 import httpx
 
 API = "http://127.0.0.1:8010"
-GPU = "http://192.168.30.87:10096"
+# GPU 机器 IP 会变（2026-09-22 由 192.168.30.87 迁到 172.16.16.120）；
+# 优先读环境变量，与 server/app/config.py 的 DIARIZE_HTTP_URL 同源。
+GPU = os.environ.get("DIARIZE_HTTP_URL", "http://172.16.16.120:10096")
 
 CN_DIGIT = {"零": "0", "幺": "1", "一": "1", "二": "2", "两": "2", "三": "3",
             "四": "4", "五": "5", "六": "6", "七": "7", "八": "8", "九": "9"}

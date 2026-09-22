@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import time
 from pathlib import Path
@@ -19,6 +20,10 @@ from pathlib import Path
 import requests
 
 PUNCT = re.compile(r"[<sil>，。！？、；：""''（）《》〈〉—…·\s]+")
+
+# GPU 机器 IP 会变（2026-09-22 由 192.168.30.87 迁到 172.16.16.120）；
+# 与 server/app/config.py 的 DIARIZE_HTTP_URL 同源，改 IP 只需动环境变量。
+GPU_URL = os.environ.get("DIARIZE_HTTP_URL", "http://172.16.16.120:10096")
 
 
 def norm(t: str) -> str:
@@ -75,7 +80,7 @@ def main() -> None:
     ap.add_argument("textgrid")
     ap.add_argument("--hotwords-file", default="")
     ap.add_argument("--max-sec", type=float, default=None)
-    ap.add_argument("--url", default="http://192.168.30.87:10096/meeting_chunk")
+    ap.add_argument("--url", default=f"{GPU_URL.rstrip('/')}/meeting_chunk")
     ap.add_argument("--timeout", type=float, default=600)
     ap.add_argument("--weight", type=float, default=1.0, help="SeACo 偏置强度 λ(0~1, 越小越温和)")
     args = ap.parse_args()

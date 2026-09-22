@@ -14,7 +14,9 @@ class Settings(BaseSettings):
 
     # GPU 非实时一体化管线 + 声纹库管理（VAD 切句 + SeACo Paraformer 转写 +
     # ERes2NetV2 认人；声纹注册/列表/删除/检测全部走这里，唯一权威库）
-    diarize_http_url: str = "http://192.168.30.87:10096"
+    # ⚠️ GPU 机器 IP 会变（2026-09-22 由 192.168.30.87 迁到 172.16.16.120，
+    # hostname gpu8）。改 IP 优先动 .env 的 DIARIZE_HTTP_URL，不用改代码。
+    diarize_http_url: str = "http://172.16.16.120:10096"
     pipeline_tick_sec: float = 4.0          # 批次调度检查间隔
     # L1 批次（ASR + 说话人标签，走 GPU 不碰 LLM 网关）：30s 下限 / 45s 硬切。
     # 2026-09-21 由 8/15 放大：转写准确度与批次大小解耦（GPU 内部 FSMN VAD 按

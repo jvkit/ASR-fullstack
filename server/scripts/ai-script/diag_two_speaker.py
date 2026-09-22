@@ -10,6 +10,7 @@
 用法:
   cd server && ../.venv/bin/python scripts/ai-script/diag_two_speaker.py ../recordings/49385009f6fd.wav
 """
+import os
 import re
 import sys
 import wave
@@ -20,7 +21,8 @@ import requests
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
-GPU = "http://192.168.30.87:10096"
+# GPU IP 会变（2026-09-22 → 172.16.16.120）；与 config.py 的 DIARIZE_HTTP_URL 同源
+GPU = os.environ.get("DIARIZE_HTTP_URL", "http://172.16.16.120:10096")
 GT_TEXTGRID = Path(__file__).resolve().parents[3] / "eval/aishell4/test/TextGrid/M_R003S01C01.TextGrid"
 
 

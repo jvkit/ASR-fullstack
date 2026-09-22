@@ -2,12 +2,13 @@
 
 段 = GT interval；embedding 路径除降噪外完全一致（GPU /embed）。
 """
-import re, sys, wave
+import os, re, sys, wave
 from pathlib import Path
 import numpy as np, requests
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
-GPU = "http://192.168.30.87:10096"
+# GPU IP 会变（2026-09-22 → 172.16.16.120）；与 config.py 的 DIARIZE_HTTP_URL 同源
+GPU = os.environ.get("DIARIZE_HTTP_URL", "http://172.16.16.120:10096")
 GT = Path(__file__).resolve().parents[3] / "eval/aishell4/test/TextGrid/M_R003S01C01.TextGrid"
 
 def load_wav(p):
