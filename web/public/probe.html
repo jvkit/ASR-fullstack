@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>音频双源探测页（腾讯会议采集可行性）</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 720px; margin: 24px auto; padding: 0 16px; color: #333; }
+  h2 { font-size: 17px; border-bottom: 2px solid #3b7fe0; padding-bottom: 4px; }
+  section { margin-bottom: 28px; padding: 12px; border: 1px solid #ddd; border-radius: 8px; }
+  button { padding: 8px 16px; margin-right: 8px; margin-bottom: 8px; cursor: pointer; }
+  pre { background: #f5f5f5; padding: 10px; border-radius: 6px; font-size: 12px; white-space: pre-wrap; word-break: break-all; }
+  .ok { color: #3aa675; font-weight: bold; }
+  .bad { color: #e6646c; font-weight: bold; }
+  audio { width: 100%; margin-top: 8px; }
+  .bar { height: 14px; background: #eee; border-radius: 7px; overflow: hidden; width: 100%; }
+  .bar > div { height: 100%; background: #3aa675; width: 0%; transition: width .1s; }
+</style>
+</head>
+<body>
+<h1>音频双源探测页</h1>
+<p>目的：验证浏览器能否同时抓「麦克风」+「系统声音（腾讯会议里别人的声音）」，并混音成一路送后端。全程本地，不联网。</p>
+
+<section>
+  <h2>① 麦克风探测（现有能力，作对照）</h2>
+  <button id="btnMic">打开麦克风</button>
+  <div>电平：<span id="micLevel">-</span></div>
+  <div class="bar"><div id="micBar"></div></div>
+  <pre id="micOut">未打开</pre>
+</section>
+
+<section>
+  <h2>② 系统声音探测（关键：getDisplayMedia 抓音频）</h2>
+  <p>点下面的按钮，弹窗里选「整个屏幕」，<b>务必勾选「分享系统音频」</b>（Chrome/Edge 桌面版才有此勾选框；不勾则拿不到音频轨）。勾选后放一段腾讯会议音频或任意视频，看有没有电平。</p>
+  <button id="btnDisp">抓取系统声音</button>
+  <div>电平：<span id="dispLevel">-</span></div>
+  <div class="bar"><div id="dispBar"></div></div>
+  <pre id="dispOut">未抓取</pre>
+</section>
+
+<section>
+  <h2>③ 双路混音录制试听（10 秒）</h2>
+  <p>先把 ①② 都打开，再点录制：两路经 GainNode 混音成 16kHz 单声道，录 10 秒后自动播放。听到「你的声音 + 电脑正在放的声音」混在一起 = 方案成立。</p>
+  <button id="btnMix">开始混音录制</button>
+  <audio id="mixPlayer" controls></audio>
+  <pre id="mixOut">未录制</pre>
+</section>
+
+<script>
+const levelTimer = (analyser, barId, labelId) => {
+  const buf = new Uint8Array(analyser.fftSize)
+  const bar = document.getElementById(barId), label = document.getElementById(labelId)
+  const t = setInterval(() => {
+    analyser.getByteTimeDomainData(buf)
+    let sum = 0
+    for (let i = 0; i < buf.length; i++) { const v = (buf[i] - 128) / 128; sum += v * v }
+    const rms = Math.sqrt(sum / buf.length)
+    label.textContent = (rms * 100).toFixed(1) + '%'
+    bar.style.width = Math.min(100, rms * 300) + '%'
+  }, 100)
+  return () => clearInterval(t)
+}
+const dumpTrack = (stream) => [...stream.getAudioTracks()].map(t => {
+  const s = t.getSettings()
+  return `${t.label}\n  settings: ${JSON.stringify(s)}`
+}).join('\n') || '(无音频轨！)'
+
+let micStream = null, dispStream = null
+
+document.getElementById('btnMic').onclick = async () => {
+  const out = document.getElementById('micOut')
+  try {
+    micStream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true } })
+    const ctx = new AudioContext()
+    const src = ctx.createMediaStreamSource(micStream)
+    const an = ctx.createAnalyser(); an.fftSize = 512
+    src.connect(an)
+    window.__stopMicLevel = levelTimer(an, 'micBar', 'micLevel')
+    out.innerHTML = '<span class="ok">✓ 麦克风 OK</span>\n' + dumpTrack(micStream)
+  } catch (e) {
+    out.innerHTML = '<span class="bad">✗ 失败: ' + e.name + ': ' + e.message + '</span>'
+  }
+}
+
+document.getElementById('btnDisp').onclick = async () => {
+  const out = document.getElementById('dispOut')
+  try {
+    if (!navigator.mediaDevices.getDisplayMedia) throw new Error('此浏览器不支持 getDisplayMedia（需要桌面版 Chrome/Edge，或 https + allow 属性）')
+    dispStream = await navigator.mediaDevices.getDisplayMedia({ audio: true, video: true }) // video 必须要，Chrome 不允许纯音频抓屏
+    const at = dispStream.getAudioTracks()
+    if (!at.length) {
+      out.innerHTML = '<span class="bad">✗ 拿到屏幕但没有音频轨</span>\n原因通常是：弹窗里没勾「分享系统音频」，或只分享了标签页/窗口（部分浏览器仅整屏给音频）。请重试并勾选。'
+      dispStream.getTracks().forEach(t => t.stop())
+      return
+    }
+    const ctx = new AudioContext()
+    const src = ctx.createMediaStreamSource(new MediaStream(at))
+    const an = ctx.createAnalyser(); an.fftSize = 512
+    src.connect(an)
+    window.__stopDispLevel = levelTimer(an, 'dispBar', 'dispLevel')
+    out.innerHTML = '<span class="ok">✓ 系统声音 OK（放点声音看电平动不动）</span>\n' + dumpTrack(dispStream)
+  } catch (e) {
+    out.innerHTML = '<span class="bad">✗ 失败: ' + e.name + ': ' + e.message + '</span>'
+  }
+}
+
+document.getElementById('btnMix').onclick = async () => {
+  const out = document.getElementById('mixOut')
+  if (!micStream || !dispStream) { out.innerHTML = '<span class="bad">✗ 请先完成 ① 和 ②</span>'; return }
+  const SR = 16000
+  const ctx = new AudioContext({ sampleRate: SR })
+  const mix = ctx.createGain()
+  const s1 = ctx.createMediaStreamSource(micStream)
+  const s2 = ctx.createMediaStreamSource(new MediaStream(dispStream.getAudioTracks()))
+  s1.connect(mix); s2.connect(mix)
+  const dest = ctx.createMediaStreamDestination()
+  mix.connect(dest)
+  // MediaRecorder 录混音流（探测页只求能听，不追求 PCM 精度）
+  const rec = new MediaRecorder(dest.stream)
+  const chunks = []
+  rec.ondataavailable = e => chunks.push(e.data)
+  rec.onstop = () => {
+    const blob = new Blob(chunks, { type: chunks[0]?.type || 'audio/webm' })
+    document.getElementById('mixPlayer').src = URL.createObjectURL(blob)
+    out.innerHTML = '<span class="ok">✓ 录制完成，点播放试听</span>\n（应为 16kHz 混音：人声 + 系统声同在一轨）'
+    ctx.close()
+  }
+  rec.start()
+  out.textContent = '录制中（10 秒）……请说话 + 让电脑放声音'
+  setTimeout(() => rec.state !== 'inactive' && rec.stop(), 10000)
+}
+</script>
+</body>
+</html>

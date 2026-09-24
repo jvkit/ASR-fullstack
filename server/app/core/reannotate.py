@@ -36,15 +36,12 @@ async def reannotate(
     pcm: bytes,
     name_threshold: float | None = None,
     timeout_sec: float | None = None,
-    anon_clusters: list | None = None,
-    anon_next: int = 1,
 ) -> bool:
     """会末重标注主入口（session.stop 里 asyncio.create_task 调用）。失败仅记日志。
 
     name_threshold: 声纹匹配阈值（None=用 config 默认 reannotate_name_threshold）。
     timeout_sec: GPU /identify_segments 超时（None=用 config identify_segments_timeout_sec）。
-    anon_clusters/anon_next: 兼容旧签名保留（3D-Speaker 每场独立聚类，匿名编号
-    每场归零，不再消费会议中累积的匿名簇状态）。
+    旧签名 anon_clusters/anon_next 已删（方案 B：会中匿名聚类已废，终版每场独立聚类）。
     返回是否产出终版（太短/失败返回 False）。
     """
     try:
@@ -77,6 +74,8 @@ async def reannotate(
         logger.info("reannotate %s: gpu identified %d segs", meeting_id, len(segs))
 
         async with SessionLocal() as db:
+            from app.core.session import display_speaker  # 未命中保留"说话人N"区分度（方案 B）
+
             await db.execute(
                 delete(ReAnnotateUtterance).where(ReAnnotateUtterance.meeting_id == meeting_id)
             )
@@ -84,7 +83,7 @@ async def reannotate(
                 db.add(ReAnnotateUtterance(
                     meeting_id=meeting_id,
                     seq=i,
-                    speaker=s.get("speaker") or "",
+                    speaker=display_speaker(s.get("speaker") or ""),
                     text=(s.get("text") or "").strip(),
                     start_ms=int(float(s["start"]) * 1000),
                     end_ms=int(float(s["end"]) * 1000),

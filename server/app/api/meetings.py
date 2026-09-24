@@ -25,6 +25,11 @@ async def get_config() -> dict:
         "pipeline_batch_max_sec": settings.pipeline_batch_max_sec,        # 超过强制成批
         "pipeline_tick_sec": settings.pipeline_tick_sec,                  # 批次调度检查间隔
         "pipeline_vad_max_end_silence_ms": settings.pipeline_vad_max_end_silence_ms,
+        # 视觉通道（线上会议抓屏抽帧）：前端 ScreenFrameCapture 从这里读，不硬编码
+        "visual_enabled": settings.visual_enabled,
+        "visual_frame_interval_sec": settings.visual_frame_interval_sec,
+        "visual_frame_width": settings.visual_frame_width,
+        "visual_frame_quality": settings.visual_frame_quality,
     }
 
 
@@ -110,6 +115,44 @@ async def meeting_reannotate(
     if not started:
         raise HTTPException(404, "recording not found")
     return {"ok": True, "meeting_id": meeting_id}
+
+
+# 视觉帧上行限制：单帧 200KB（base64 后 ~267KB），单请求 ≤ 6 帧
+_MAX_JPEG_B64 = 267 * 1024
+_MAX_FRAMES_PER_REQ = 6
+
+
+@router.post("/meetings/{meeting_id}/frames")
+async def meeting_frames(meeting_id: str, payload: dict) -> dict:
+    """视觉通道收帧（线上会议/摄像头定时抽帧，见 docs/achit/视频侧接口与代码地图 §3.1）。
+
+    payload: {"frames": [{"t_ms": int, "jpeg_b64": str}, ...]}
+    帧进 VisualBuffer；会议纪要波次（enhancer）触发时作为一组送 OCR。
+    """
+    from base64 import b64decode
+
+    from app.core.session import session_manager
+
+    session = session_manager.get(meeting_id)
+    if session is None or session.stopped:
+        raise HTTPException(404, "live meeting not found")
+    frames = payload.get("frames") or []
+    if not isinstance(frames, list) or len(frames) > _MAX_FRAMES_PER_REQ:
+        raise HTTPException(400, f"frames must be a list of ≤{_MAX_FRAMES_PER_REQ}")
+    ok = 0
+    for f in frames:
+        if not isinstance(f, dict):
+            continue
+        b64 = f.get("jpeg_b64") or ""
+        if not isinstance(b64, str) or len(b64) > _MAX_JPEG_B64:
+            continue
+        try:
+            jpeg = b64decode(b64)
+        except Exception:
+            continue
+        if session.visual.add_frame(int(f.get("t_ms") or 0), jpeg):
+            ok += 1
+    return {"ok": True, "accepted": ok, "buffered": session.visual.buffered}
 
 
 @router.get("/meetings/{meeting_id}/audio")

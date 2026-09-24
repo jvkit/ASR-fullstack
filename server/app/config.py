@@ -38,22 +38,14 @@ class Settings(BaseSettings):
     # 匿名聚类簇内切簇落差（split_gap）：同人段间相似度自然分布宽度 0.15+，
     # 注册场景的 0.12 会把聚好的簇拆成单段簇（盲测 6 真人出 30 陌生人）。
     # 0.35 起激进调参验证中（2026-09-16）
+    # ---------- 匿名聚类（方案 B 前旧参数，2026-09-22 全部废弃保留文档） ----------
+    # 以下参数已无代码引用（会中匿名聚类已杀，未命中统一"未识别"）；
+    # 保留为死键待清理，注释保留标定历史供回滚参考。
     anon_split_gap: float = 0.20
-    # 匿名聚类入簇地板（anon_threshold）：段对簇质心相似度 ≥ 此值才入簇。
-    # 定档 0.48（2026-09-18，3 场会 GT 标定 calib_floor_gpu.py）：同人段 p5=0.548、
-    # 跨人 p95=0.415，中点 0.481。原 0.35 低于跨人 p95 → 结构上必然过合并
-    # （"全场陌生人1"实锤）。尾部跨人 max 0.52~0.58 超 0.48 为已知限制，
-    # 单一阈值无法根治，属最小错误率工作点。DER 验证记录见 eval/tuning_log.md。
     anon_cluster_threshold: float = 0.48
-    # 匿名簇两次确认制：候选攒满 confirm_count 段才升级发号（防 0.5s 语气词自立簇心；
-    # 2026-09-16 设计，日志 [anon] 可审计每个段的去向）
     anon_confirm_count: int = 2
-    # 会末尾音归属：孤段先对成熟簇重比（>=anon_cluster_threshold 吸收），
-    # 仍孤则对时间前后相邻两簇比相似度，贴像的一边；两边都 < tail_min_sim 不贴。
-    # 只处理孤段候选，只作用于会末终版
     anon_tail_attach: bool = True
     anon_tail_min_sim: float = 0.25
-    # 显示层：簇总时长 < 此值不显示陌生人编号，统一"未识别短语音"（身份数据不受影响）
     anon_display_min_sec: float = 3.0
     # 显示层合并：详情接口序列化时，同说话人且间隙 ≤ 此秒数的相邻段并成一行展示
     # （2026-09-18，配合 VAD 回 250 的碎段治理；只影响展示/阅读，不动 DB 原子段
@@ -154,6 +146,17 @@ class Settings(BaseSettings):
     # 热词
     hotwords_file: str = "./hotwords/dict_daily5k.txt"  # 大词库文件（每行一词，空行/#注释忽略）
     hotwords_extra: str = ""               # 额外热词（逗号分隔），公司人名/项目名
+
+    # ---------- 线上会议视觉通道（2026-09-22 视觉侧交接，代码地图见
+    # docs/achit/视频侧接口与代码地图-20260922.md） ----------
+    visual_enabled: bool = True
+    visual_frame_interval_sec: float = 10.0   # 前端抽帧间隔（10s 甜点：写字/遮挡均覆盖）
+    visual_frame_width: int = 960             # 前端缩略宽度（960 实测小字全可读；白板读不清再升 1280）
+    visual_frame_quality: int = 80            # JPEG 质量
+    visual_llm_model: str = "new"             # 多模态池（chat 池对图片请求报错，唯一可用 new）
+    visual_llm_timeout_sec: int = 300         # 多帧读图分钟级，给足余量
+    visual_prompt_app: str = "online"         # online | offline（提示词模板选择）
+    visual_max_buffer_frames: int = 24        # 帧缓冲上限（≈4min 积压容量，防雪球）
 
 
 def load_hotwords() -> str:

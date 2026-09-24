@@ -24,6 +24,7 @@ import json
 import logging
 
 from app.config import settings
+from app.core.visual_ocr import visual_ocr
 
 logger = logging.getLogger(__name__)
 
@@ -95,13 +96,26 @@ class BatchEnhancer:
             return
         cur_raw = [(it.speaker or "发言人", it.text) for it in items]
 
+        # 视觉波次（协同模型：音频侧是节拍器，凑满一波时取走帧组送 OCR，
+        # 见 docs/achit/视频侧接口与代码地图-20260922.md §1/§3.4）
+        ocr_text = ""
+        if settings.visual_enabled and self._session.visual_app:
+            try:
+                frames = await self._session.visual.take_group()
+                if frames:
+                    ocr_text = await visual_ocr(frames, app=self._session.visual_app)
+            except Exception:
+                logger.exception("visual wave failed for %s（不阻塞纪要）",
+                                 self._session.meeting_id)
+
         # 上下文窗口：前 N 波已定稿段纪要（排除最后一波——它单独给，因为要订正）
         n_ctx = settings.summary_context_segments
         ctx = self._segments[-(n_ctx + 1):-1] if len(self._segments) > 1 else []
         ctx_summaries = [self._fmt_segment(s) for s in ctx]
         prev_summary = self._segments[-1]["content"] if self._segments else ""
 
-        result = await _llm_enhance(ctx_summaries, prev_summary, self._prev_lines, cur_raw)
+        result = await _llm_enhance(ctx_summaries, prev_summary, self._prev_lines, cur_raw,
+                                    ocr_text=ocr_text)
         if result is None:
             # 失败不兜底：记日志跳过。本波原文仍登记为「上一波」，
             # 下一波的 2 波原文窗口会带上它 → 纠错自动延后一波补做。
@@ -306,7 +320,8 @@ class BatchEnhancer:
 
 async def _llm_enhance(ctx_summaries: list[str], prev_summary: str,
                        prev_lines: list[tuple[str, str]],
-                       cur_lines: list[tuple[str, str]]) -> dict | None:
+                       cur_lines: list[tuple[str, str]],
+                       ocr_text: str = "") -> dict | None:
     """一波一次合并 LLM 调用。失败/超时返回 None（调用方记日志跳过，不重试不累积）。
 
     Langfuse 经 openai wrapper 自动埋点。超时 roll_llm_timeout_sec 秒即放弃。
@@ -314,7 +329,7 @@ async def _llm_enhance(ctx_summaries: list[str], prev_summary: str,
     from app.llm import client as llm_client
 
     messages = llm_client.build_enhance_messages(ctx_summaries, prev_summary,
-                                                 prev_lines, cur_lines)
+                                                 prev_lines, cur_lines, ocr_text=ocr_text)
     try:
         resp = await asyncio.wait_for(
             asyncio.to_thread(

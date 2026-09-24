@@ -27,9 +27,10 @@ export class MeetingWs {
     return this.ws?.readyState === WebSocket.OPEN
   }
 
-  start(title: string, opts?: { replayOf?: string }): void {
+  start(title: string, opts?: { replayOf?: string; online?: boolean }): void {
     const payload: Record<string, unknown> = { type: 'start', title }
     if (opts?.replayOf) payload.replay_of = opts.replayOf
+    if (opts?.online) payload.online = true
     this.ws?.send(JSON.stringify(payload))
   }
 

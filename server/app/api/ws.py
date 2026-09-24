@@ -62,6 +62,7 @@ async def meeting_ws(ws: WebSocket) -> None:
             recorder=str(ctrl.get("recorder") or ""),
             replay_of=replay_of,
             client_replay=bool(ctrl.get("client_replay")),
+            online=bool(ctrl.get("online")),
         )
         session.clients.add(ws)
         await session.start()

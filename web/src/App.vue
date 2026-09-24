@@ -9,6 +9,7 @@ import Recorder from './components/Recorder.vue'
 import SpeakerManage from './components/SpeakerManage.vue'
 import SummaryPanel from './components/SummaryPanel.vue'
 import { MicRecorder } from './ws/audio'
+import { ScreenFrameCapture } from './ws/screen'
 import { MeetingWs, type ServerMessage } from './ws/client'
 
 interface Utterance {
@@ -51,6 +52,10 @@ const replayFinished = ref(false)
 
 const mic = reactive(new MicRecorder())
 const ws = reactive(new MeetingWs())
+// 线上会议视觉通道：额外抓屏（系统声+屏幕同一次 getDisplayMedia），定时抽帧上行 OCR
+const onlineMode = ref(false)
+const screenCapture = new ScreenFrameCapture()
+let pendingDisplayStream: MediaStream | null = null
 
 // 说话人配色（按出现顺序循环）
 const speakerColors = ['#e6646c', '#3aa675', '#3b7fe0', '#a06ee1', '#d98e32', '#2ba0b8', '#c2568c', '#6a8f3c']
@@ -67,6 +72,14 @@ function handleMessage(msg: ServerMessage) {
   switch (msg.type) {
     case 'started':
       meetingId.value = msg.meeting_id
+      // 线上会议：拿到 meeting_id 后启动屏幕抽帧（帧要带 meeting_id 上行）
+      if (onlineMode.value && pendingDisplayStream) {
+        // 用户在浏览器分享条上手动取消分享：video 轨 ended → 只停抽帧，音频不动
+        pendingDisplayStream.getVideoTracks()[0]?.addEventListener('ended', () => {
+          screenCapture.stop()
+        })
+        screenCapture.start(pendingDisplayStream, msg.meeting_id).catch(() => {})
+      }
       break
     case 'transcript':
       utterances.value.push({ seq: msg.seq, speaker: msg.speaker || '发言人', text: msg.text, draft: true })
@@ -105,6 +118,9 @@ function handleMessage(msg: ServerMessage) {
     case 'ended':
       recording.value = false
       paused.value = false
+      screenCapture.stop()
+      pendingDisplayStream?.getTracks().forEach((t) => t.stop())
+      pendingDisplayStream = null
       if (replaying.value) {
         replayFinished.value = true
       }
@@ -120,11 +136,12 @@ function handleMessage(msg: ServerMessage) {
   }
 }
 
-async function onStart(payload: { title: string }) {
+async function onStart(payload: { title: string; online?: boolean }) {
   if (insecure.value) {
     showToast({ message: 'http 访问下浏览器禁止麦克风，请用 https 地址打开', type: 'fail', duration: 4000 })
     return
   }
+  onlineMode.value = !!payload.online
   errorMsg.value = ''
   utterances.value = []
   summaries.value = []
@@ -133,11 +150,26 @@ async function onStart(payload: { title: string }) {
 
   await ws.connect()
   ws.onMessage(handleMessage)
-  // 先开麦（拿到 onPcm 回调），再 start —— 回调里检查 ws.ready 防竞态
+  // 线上会议：先抓屏（getDisplayMedia 必须在用户手势内调用），系统声+屏幕同一次采集；
+  // audio 轨交给系统声混音，video 轨给 ScreenFrameCapture 定时抽帧
+  if (onlineMode.value) {
+    try {
+      pendingDisplayStream = await navigator.mediaDevices.getDisplayMedia({
+        audio: true,
+        video: { frameRate: 5 },
+      })
+    } catch (e) {
+      showToast({ message: `屏幕分享被取消或失败：${e}`, type: 'fail', duration: 4000 })
+      ws.close()
+      return
+    }
+  }
+  // 先开麦（拿到 onPcm 回调），再 start —— 回调里检查 ws.ready 防竞态；
+  // 线上会议时把 display stream 传给 mic：系统声轨混音进同一 PCM 通路
   try {
     await mic.start((bytes) => {
       if (ws.ready && !paused.value) ws.sendPcm(bytes)
-    })
+    }, undefined, onlineMode.value ? pendingDisplayStream ?? undefined : undefined)
   } catch (e) {
     const name = (e as DOMException)?.name
     showToast({
@@ -151,7 +183,7 @@ async function onStart(payload: { title: string }) {
     ws.close()
     return
   }
-  ws.start(payload.title)
+  ws.start(payload.title, { online: onlineMode.value })
   recording.value = true
 }
 
@@ -159,17 +191,25 @@ async function onPause() {
   paused.value = true
   await mic.pause()
   ws.pause()
+  screenCapture.pause()
 }
 
 async function onResume() {
   paused.value = false
   await mic.resume()
   ws.resume()
+  if (onlineMode.value && pendingDisplayStream && meetingId.value) {
+    screenCapture.resume(meetingId.value, pendingDisplayStream)
+  }
 }
 
 async function onStop() {
   ws.stop()
   await mic.stop()
+  screenCapture.stop()
+  // 会议结束才释放整条 display stream（视频轨提前 stop 会连累系统音频轨）
+  pendingDisplayStream?.getTracks().forEach((t) => t.stop())
+  pendingDisplayStream = null
   // 立即切回「开始记录」，不等服务端 ended（服务端还要 flush + 最终总结，可能十几秒）
   recording.value = false
   paused.value = false
@@ -295,7 +335,18 @@ onMounted(() => {
 
       <!-- 会议记录视图（批次转写） -->
       <template v-else-if="view === 'live'">
-        <Recorder :recording="recording" :paused="paused" :insecure="insecure" @start="onStart" @pause="onPause" @resume="onResume" @stop="onStop" />
+        <Recorder
+          :recording="recording"
+          :paused="paused"
+          :insecure="insecure"
+          :online="onlineMode"
+          :mic-on="mic.micOn"
+          @start="onStart"
+          @pause="onPause"
+          @resume="onResume"
+          @stop="onStop"
+          @mic-toggle="(on: boolean) => mic.setMicEnabled(on)"
+        />
 
         <div v-if="liveAttrs.length" class="live-attrs">
           <van-tag

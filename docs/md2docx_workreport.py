@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """工作汇报 md -> Word（一次性脚本）。图插在对应章节，产物与 md 同目录同名 .docx。"""
 import re
+import sys
 from pathlib import Path
 
 from docx import Document
@@ -8,8 +9,11 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml.ns import qn
 from docx.shared import Cm, Pt
 
-MD = Path("docs/工作汇报-20260917-0918-聚类定档与纠错.md")
-FIGDIR = Path("docs/工作汇报-20260917-0918-图")
+DEFAULT_MD = Path("docs/工作汇报-20260917-0918-聚类定档与纠错.md")
+MD = Path(sys.argv[1]) if len(sys.argv) > 1 else DEFAULT_MD
+FIGDIR = (MD.parent / f"{MD.stem.removesuffix('-20260923')}-图"
+          if MD.name.startswith("实时说话人分离方案评测汇报-")
+          else MD.with_name(f"{MD.stem}-图"))
 OUT = MD.with_suffix(".docx")
 
 doc = Document()
@@ -68,6 +72,9 @@ def shot(fname, caption):
     r.italic = True
 
 
+REPORT_FIGS = {
+    "01-diart-轮换题整体对比.png": "diart 轮换题听感台：同一段六人轮换音频，依次对比人工 GT、3D-Speaker、diart 默认及两个参数变体。",
+}
 FIG1_AFTER = "结论：**归属原子性优先**"
 FIG2_AFTER = "λ=1.0 会帮倒忙"
 
@@ -83,6 +90,8 @@ while i < len(lines):
         heading(line[4:], 2)
     elif line.startswith("## "):
         heading(line[3:], 1)
+        if MD != DEFAULT_MD and line.startswith("## 附录 A：评测口径与解释"):
+            shot("01-diart-轮换题整体对比.png", REPORT_FIGS["01-diart-轮换题整体对比.png"])
     elif line.startswith("# "):
         t = doc.add_heading(line[2:], level=0)
         for r in t.runs:
@@ -100,6 +109,8 @@ while i < len(lines):
         para("• " + line[2:])
     else:
         para(line)
+        if MD != DEFAULT_MD and line.startswith("## 附录 A：评测口径与解释"):
+            shot("01-diart-轮换题整体对比.png", REPORT_FIGS["01-diart-轮换题整体对比.png"])
         if not inserted[1] and FIG1_AFTER in line:
             inserted[1] = True
             shot("fig1_VAD分割调试对比听感台.png",
@@ -114,14 +125,15 @@ while i < len(lines):
                  "避免裸替换类误纠（如「校长→晓庄」）的词表治理过程。")
     i += 1
 
-# 附：降噪对比（明日计划第 3 条相关，图放在文末附加节）
-heading("附：降噪方案对比试听（GTCRN / DeepFilterNet3 / FRCRN）", 1)
-para("同一批录音样本分别过三种降噪模型的试听对比台：每条样本并列展示「原声（未降噪）/ GTCRN（西工大）/ "
-     "DeepFilterNet3（德国）/ FRCRN（阿里）」四个版本波形，人工盲听听感并结合作管线实测"
-     "（DER 19.0% → GTCRN 12.3% → FRCRN 9.1%，但 FRCRN 误伤人声且慢 30 倍）选定 GTCRN 上线。")
-shot("fig3_降噪对比试听台.png",
-     "图 3 ｜ 降噪对比试听台：同一样本四种版本（原声/GTCRN/DeepFilterNet3/FRCRN）并列试听，"
-     "历史记录持久化，支撑降噪模型选型决策。")
+if MD == DEFAULT_MD:
+    # 旧报告附图（保留原有行为）。
+    heading("附：降噪方案对比试听（GTCRN / DeepFilterNet3 / FRCRN）", 1)
+    para("同一批录音样本分别过三种降噪模型的试听对比台：每条样本并列展示「原声（未降噪）/ GTCRN（西工大）/ "
+         "DeepFilterNet3（德国）/ FRCRN（阿里）」四个版本波形，人工盲听听感并结合作管线实测"
+         "（DER 19.0% → GTCRN 12.3% → FRCRN 9.1%，但 FRCRN 误伤人声且慢 30 倍）选定 GTCRN 上线。")
+    shot("fig3_降噪对比试听台.png",
+         "图 3 ｜ 降噪对比试听台：同一样本四种版本（原声/GTCRN/DeepFilterNet3/FRCRN）并列试听，"
+         "历史记录持久化，支撑降噪模型选型决策。")
 
 doc.save(str(OUT))
 print("saved:", OUT, "| figs inserted:", inserted)

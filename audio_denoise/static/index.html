@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>降噪试听台</title>
+<style>
+  body { font-family: -apple-system, "Microsoft YaHei", sans-serif; max-width: 720px; margin: 0 auto; padding: 16px; background: #1a1a2e; color: #eee; }
+  h1 { font-size: 20px; }
+  .card { background: #16213e; border-radius: 12px; padding: 16px; margin: 12px 0; }
+  button { background: #0f7b6c; color: #fff; border: 0; border-radius: 8px; padding: 12px 20px; font-size: 15px; cursor: pointer; }
+  button:disabled { background: #444; cursor: not-allowed; }
+  button.rec { background: #c0392b; }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+  audio { width: 100%; margin-top: 6px; }
+  .item { background: #0f3460; border-radius: 8px; padding: 10px 12px; margin-top: 10px; }
+  .tag { display: inline-block; background: #e94560; border-radius: 4px; padding: 1px 8px; font-size: 12px; margin-right: 8px; }
+  .status { color: #9ad; font-size: 13px; margin-top: 8px; white-space: pre-wrap; }
+  input[type=file] { color: #ccc; }
+  .spin { display: inline-block; animation: r 1s linear infinite; }
+  @keyframes r { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+<h1>🎙️ 降噪试听台（GTCRN / DeepFilterNet / FRCRN）</h1>
+
+<div class="card">
+  <div class="row">
+    <button id="btnRec">● 开始录音</button>
+    <input type="file" id="file" accept="audio/*">
+    <button id="btnUpload">上传并降噪</button>
+    <span id="recTime" style="color:#e94560"></span>
+  </div>
+  <div class="status" id="recStatus">录音建议：安静 5 秒 → 说话 → 敲键盘 → 双人交替。历史自动保存，刷新不丢。</div>
+</div>
+
+<div id="results"></div>
+
+<script>
+const NAMES = { orig: '原声（未降噪）', gtcrn: 'GTCRN（西工大）', dfnet: 'DeepFilterNet3（德国）', frcrn: 'FRCRN（阿里）' };
+const btnRec = document.getElementById('btnRec');
+const btnUpload = document.getElementById('btnUpload');
+const recTime = document.getElementById('recTime');
+const recStatus = document.getElementById('recStatus');
+let mediaRecorder = null, chunks = [], timer = null, sec = 0, stream = null, busy = false;
+
+function setBusy(b, text) {
+  busy = b;
+  btnRec.disabled = b;
+  btnUpload.disabled = b;
+  document.getElementById('file').disabled = b;
+  if (text) recStatus.innerHTML = text;
+}
+
+function renderResult(d, isNew) {
+  let html = `<div class="card" id="card_${d.id}"><b>结果 ${d.id}</b>`;
+  for (const k of ['orig','gtcrn','dfnet','frcrn']) {
+    const src = d.audios[k];
+    html += `<div class="item"><span class="tag">${NAMES[k]}</span>` +
+      (src ? `<audio controls src="${src}"></audio>` : '<i style="color:#789">处理中…</i>') + `</div>`;
+  }
+  html += '</div>';
+  const el = document.getElementById('results');
+  if (isNew) el.insertAdjacentHTML('afterbegin', html);
+  else el.insertAdjacentHTML('beforeend', html);
+}
+
+async function refreshCard(id) {
+  // 轮询直到四件套齐全（处理中刷新卡片）
+  const r = await fetch('/api/history');
+  const d = await r.json();
+  const h = d.history.find(x => x.id === id);
+  if (!h) return;
+  const card = document.getElementById('card_' + id);
+  if (card) {
+    card.outerHTML = '';
+    renderResult(h, true);
+  }
+  if (Object.keys(h.audios).length < 4) setTimeout(() => refreshCard(id), 15000);
+}
+
+async function loadHistory() {
+  const r = await fetch('/api/history');
+  const d = await r.json();
+  for (const h of d.history) renderResult(h, false);
+  recStatus.textContent = `历史 ${d.history.length} 条（已持久化到服务器磁盘）。录音建议：安静 5 秒 → 说话 → 敲键盘 → 双人交替。`;
+}
+loadHistory();
+
+btnRec.onclick = async () => {
+  if (mediaRecorder && mediaRecorder.state === 'recording') { mediaRecorder.stop(); return; }
+  if (busy) return;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      audio: { channelCount: 1, sampleRate: 16000, echoCancellation: true, noiseSuppression: false, autoGainControl: false }
+    });
+  } catch (e) { recStatus.textContent = '拿不到麦克风: ' + e.message; return; }
+  chunks = []; sec = 0;
+  mediaRecorder = new MediaRecorder(stream);
+  mediaRecorder.ondataavailable = e => chunks.push(e.data);
+  mediaRecorder.onstop = async () => {
+    clearInterval(timer);
+    btnRec.textContent = '● 开始录音'; btnRec.classList.remove('rec');
+    stream.getTracks().forEach(t => t.stop());
+    const blob = new Blob(chunks, { type: mediaRecorder.mimeType });
+    await submit(blob);
+  };
+  mediaRecorder.start();
+  btnRec.textContent = '■ 停止并降噪'; btnRec.classList.add('rec');
+  timer = setInterval(() => { sec++; recTime.textContent = sec + 's'; }, 1000);
+  recStatus.textContent = '录音中…（浏览器降噪已故意关闭，录生肉；降噪全靠三家模型）';
+};
+
+document.getElementById('btnUpload').onclick = () => {
+  if (busy) return;
+  const f = document.getElementById('file').files[0];
+  if (!f) { alert('先选文件'); return; }
+  submit(f);
+};
+
+async function submit(blob) {
+  setBusy(true, '<span class="spin">⏳</span> 上传并降噪中… GTCRN/DeepFilterNet 约 10-60 秒；<b>FRCRN 很慢（约 0.5 倍实时，5 分钟素材要 10 分钟）</b>，页面会自动刷新结果，可以先去干别的。');
+  const fd = new FormData();
+  fd.append('file', blob, 'rec.webm');
+  const t0 = Date.now();
+  try {
+    const r = await fetch('/api/denoise', { method: 'POST', body: fd });
+    const d = await r.json();
+    if (d.error) { setBusy(false, '失败: ' + d.error); return; }
+    renderResult(d, true);
+    setBusy(false, `完成（${((Date.now()-t0)/1000).toFixed(0)}s）。FRCRN 若显示"处理中"会每 15 秒自动补齐，无需刷新。`);
+    setTimeout(() => refreshCard(d.id), 15000);
+  } catch (e) {
+    setBusy(false, '网络错误: ' + e.message);
+  }
+}
+</script>
+</body>
+</html>

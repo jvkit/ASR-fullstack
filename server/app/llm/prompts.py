@@ -97,8 +97,13 @@ def _fmt_numbered(lines: list[tuple[str, str]]) -> str:
 
 def build_enhance_messages(ctx_summaries: list[str], prev_summary: str,
                            prev_lines: list[tuple[str, str]],
-                           cur_lines: list[tuple[str, str]]) -> list[dict]:
+                           cur_lines: list[tuple[str, str]],
+                           ocr_text: str = "") -> list[dict]:
     """一波一次调用（纠错本波 + 稀疏订正上一波 + 出本波段纪要）的提示词构造。
+
+    ocr_text: 本波屏幕内容记录（视觉 OCR，见 docs/achit/视频侧接口与代码地图）。
+    供 LLM 做有证据的纠错（屏幕印着「PRIME AI」，ASR 听成「怕爱」→ 视觉即热词库）
+    与纪要吸收屏幕信息。空串 = 本波无帧/OCR 失败，不拼接。
 
     ctx_summaries: 前 N 波已定稿段纪要（滑动窗口，summary_context_segments 控制），
     仅作上下文防人名/术语漂移；提示词明确要求不要重复总结它们。
@@ -121,6 +126,9 @@ def build_enhance_messages(ctx_summaries: list[str], prev_summary: str,
                  f"{_fmt_numbered(prev_lines)}")
     parts.append(f"【本波转写原文（带行号；待纠错，并为它出段纪要。lines 需逐行回传并带上 i）】\n"
                  f"{_fmt_numbered(cur_lines)}")
+    if ocr_text.strip():
+        parts.append("【本波屏幕内容记录（视觉 OCR 提取，供纠错证据与纪要参考；"
+                     "屏幕上的术语/标题可作为纠错依据，不要重复总结）】\n" + ocr_text.strip())
     user = "\n\n".join(parts)
     return [
         {"role": "system", "content": ENHANCE_SYSTEM},

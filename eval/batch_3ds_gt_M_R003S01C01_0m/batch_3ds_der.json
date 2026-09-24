@@ -1,0 +1,27 @@
+{
+  "sys": "../eval/batch_3ds_gt_M_R003S01C01_0m/batch_3ds_gt_M_R003S01C01_0m.rttm",
+  "gt": "out/bench/gt_M_R003S01C01_0m.rttm",
+  "collar": 0.25,
+  "DER": 7.62,
+  "miss": 0.3,
+  "FA": 0.0,
+  "confusion": 7.32,
+  "nref_frames": 2663,
+  "sys_segments": 26,
+  "sys_labels": [
+    "001-M",
+    "006-F"
+  ],
+  "gt_speakers": [
+    "001-M",
+    "002-M",
+    "003-F",
+    "004-F",
+    "005-F",
+    "006-F"
+  ],
+  "mapping": {
+    "001-M": "001-M",
+    "006-F": "006-F"
+  }
+}

@@ -74,7 +74,12 @@ async def extract_final_attributes(segments_text: str) -> dict:
 
 def build_enhance_messages(ctx_summaries: list[str], prev_summary: str,
                            prev_lines: list[tuple[str, str]],
-                           cur_lines: list[tuple[str, str]]) -> list[dict]:
-    """一波一次合并调用（纠错本波 + 订正上一波文本/纪要 + 出本波段纪要）的提示词构造。"""
-    return prompts.build_enhance_messages(ctx_summaries, prev_summary, prev_lines, cur_lines)
+                           cur_lines: list[tuple[str, str]],
+                           ocr_text: str = "") -> list[dict]:
+    """一波一次合并调用（纠错本波 + 订正上一波文本/纪要 + 出本波段纪要）的提示词构造。
+
+    ocr_text: 本波视觉 OCR 文本（线上会议屏幕内容），空串 = 无视觉上下文。
+    """
+    return prompts.build_enhance_messages(ctx_summaries, prev_summary, prev_lines,
+                                          cur_lines, ocr_text=ocr_text)
 

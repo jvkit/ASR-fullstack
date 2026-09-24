@@ -30,10 +30,23 @@ from app.llm import client as llm_client
 
 logger = logging.getLogger(__name__)
 
+# 方案 B（2026-09-22）：会中不做匿名聚类，会中/会末共用 GPU identify_segments 的声纹认人。
+# 未命中声纹库时 GPU 输出兜底号"说话人N"（全场一次分离，编号稳定可区分），前端原样保留
+# 区分度；仅无意义标签（空/待定/旧版"陌生人N"聚类发号）降级"未识别"。
+UNKNOWN_SPEAKER = "未识别"
+
+
+def display_speaker(spk: str) -> str:
+    """GPU 侧标签 → 前端显示标签：注册人名与"说话人N"兜底号原样保留，其余 → 未识别。"""
+    if not spk or spk in ("待定",) or spk.startswith("陌生人"):
+        return UNKNOWN_SPEAKER
+    return spk
+
 
 class MeetingSession:
     def __init__(self, meeting_id: str, title: str, recorder: str,
-                 replay_of: str | None = None, client_replay: bool = False) -> None:
+                 replay_of: str | None = None, client_replay: bool = False,
+                 online: bool = False) -> None:
         self.meeting_id = meeting_id
         self.title = title
         self.recorder = recorder
@@ -44,6 +57,13 @@ class MeetingSession:
         self.buffer = UtteranceBuffer()
         self._stopped = False
         self._lock = asyncio.Lock()
+
+        # 视觉通道帧缓冲（线上会议/摄像头帧收发，波次触发时 take_group）
+        from app.core.visual_buffer import VisualBuffer
+        self.visual = VisualBuffer(meeting_id)
+        # 视觉提示词应用层（None=无视觉；"online"=屏幕共享，"offline"=摄像头）。
+        # 来自 WS start 的 online 标记：线上会议默认屏幕，线下默认关（摄像头场景后续可开）
+        self.visual_app: str | None = "online" if online else None
 
         self.enhancer = BatchEnhancer(self)
 
@@ -56,25 +76,24 @@ class MeetingSession:
         self._batch_loop_task: asyncio.Task | None = None
         # 热词（FunASR 按空白切分；load_hotwords 逗号格式转空格）
         self._hotwords = load_hotwords().replace(",", " ")
-        # 匿名簇会话状态（陌生人N 跨批次稳定）：GPU 每批回传更新，下批回传
-        self.anon_clusters: list[dict] = []
-        self.anon_next = 1
-
-    def _merge_anon(self, anon: list[dict]) -> None:
-        """整体替换匿名状态（GPU 每批回传全量快照：正式簇+候选；升级/贴附消失的不带回）。
-
-        2026-09-16 改：旧版按 id upsert，候选升级/尾音贴附后旧条目永不删除会幽灵复活。
-        """
-        import re
-        if not anon:
-            return
-        self.anon_clusters = anon
-        nums = [int(m.group(1)) for c in anon
-                for m in [re.match(r"陌生人(\d+)", c["id"])] if m]
-        if nums:
-            self.anon_next = max(nums) + 1
+        # 方案 B（2026-09-22 用户拍板）：会中杀掉自研匿名聚类。会中只做声纹库认人：
+        # GPU 回传的"说话人N"兜底号原样保留区分度，无意义标签由 display_speaker 降级。
+        # 旧状态 anon_clusters/anon_next 已删（self-check：无引用残留）。
 
     # ---------- 生命周期 ----------
+
+    @property
+    def stopped(self) -> bool:
+        """公开只读：会话是否已结束（REST 收帧接口用它拒收停止后的帧）。"""
+        return self._stopped
+
+    def _merge_anon(self, anon: list[dict]) -> None:
+        """方案 B 后为空操作（保留方法防外部引用断裂；旧匿名状态已删）。
+
+        旧版：GPU 每批回传全量匿名簇快照，跨批持久化实现"陌生人N 跨批次稳定"。
+        2026-09-22 起会中不再做匿名聚类，anon 状态无需跨批维护。
+        """
+        return
 
     async def start(self) -> None:
         async with SessionLocal() as db:
@@ -195,13 +214,11 @@ class MeetingSession:
         except Exception:
             logger.exception("meeting %s finalize failed", session_id)
 
-        # 会末全场重跑（与会议中同一 /meeting_chunk 管线）→ utterances_re 权威终版
+        # 会末全场重跑（3D-Speaker 唯一生产路径）→ utterances_re 权威终版
         from app.core.reannotate import reannotate
 
         pcm = bytes(self._audio)
-        if await reannotate(session_id, pcm,
-                            anon_clusters=self.anon_clusters,
-                            anon_next=self.anon_next):
+        if await reannotate(session_id, pcm):
             await self.broadcast({"type": "reannotated", "meeting_id": session_id})
 
     # ---------- 音频上行与批次调度 ----------
@@ -254,10 +271,8 @@ class MeetingSession:
 
         chunk = pcm[:int(cut_ms * 32)]
         # shield：stop 取消批次循环时，在飞的 GPU 请求仍跑完（否则 flush 会重复送）
-        res = await asyncio.shield(meeting_chunk(
-            chunk, self._hotwords,
-            anon_clusters=self.anon_clusters, anon_next=self.anon_next,
-        ))
+        # 方案 B：不再传匿名簇状态（GPU 侧走默认空状态，只做声纹库认人）
+        res = await asyncio.shield(meeting_chunk(chunk, self._hotwords))
         if res is None:
             self._chunk_failures += 1
             if self._chunk_failures >= 3 and not force:
@@ -268,8 +283,7 @@ class MeetingSession:
                 self._processed = total
                 self._chunk_failures = 0
             return
-        segs, anon = res
-        self._merge_anon(anon)
+        segs, _anon = res  # anon 已弃用（方案 B：会中不做匿名聚类）
         self._chunk_failures = 0
         base_ms = self._processed // 32
         self._processed += len(chunk)
@@ -283,7 +297,7 @@ class MeetingSession:
                 continue  # 空段不展示（碎段已在 GPU 侧参与打标/修剪）
             start_ms = int(base_ms + float(s["start"]) * 1000)
             end_ms = int(base_ms + float(s["end"]) * 1000)
-            item = await self.buffer.add(s.get("speaker") or "", text, start_ms, end_ms)
+            item = await self.buffer.add(display_speaker(s.get("speaker") or ""), text, start_ms, end_ms)
             async with SessionLocal() as db:
                 db.add(Utterance(
                     meeting_id=self.meeting_id,
@@ -395,10 +409,10 @@ class SessionManager:
         self._sessions: dict[str, MeetingSession] = {}
 
     def create(self, title: str, recorder: str, replay_of: str | None = None,
-               client_replay: bool = False) -> MeetingSession:
+               client_replay: bool = False, online: bool = False) -> MeetingSession:
         meeting_id = uuid.uuid4().hex[:12]
         session = MeetingSession(meeting_id, title, recorder, replay_of=replay_of,
-                                 client_replay=client_replay)
+                                 client_replay=client_replay, online=online)
         self._sessions[meeting_id] = session
         return session
 

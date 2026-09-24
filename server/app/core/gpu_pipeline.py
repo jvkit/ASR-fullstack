@@ -49,15 +49,14 @@ async def vad_ends(pcm: bytes) -> list[float] | None:
 
 
 async def meeting_chunk(pcm: bytes, hotwords: str = "", timeout_sec: float | None = None,
-                        anon_clusters: list | None = None, anon_next: int = 1,
                         final: bool = False) -> tuple | None:
     """一体化管线：音频 -> (带说话人的子段列表, 匿名簇更新)。
 
-    返回 (segs, anon)；segs=[{start, end, speaker, text}]，anon=[{id, emb, secs}]
-    为本次更新/新增的匿名簇（调用方持久化后随下批回传）；失败返回 None。
+    返回 (segs, anon)；segs=[{start, end, speaker, text}]。anon 仍返回（GPU 契约不变）
+    但调用方已弃用（方案 B：会中不做匿名聚类，"说话人N"兜底号由 session.display_speaker
+    原样保留区分度）；失败返回 None。
     timeout_sec: 覆盖默认 pipeline_chunk_timeout_sec（会末全场重跑传大值）。
-    final: True=会末终版（兜底发号+尾音归属+显示降级）；False=会中批次
-    （未确认候选回传为 cand 条目，段标"待定"）。
+    final: True=会末终版（兜底发号+尾音归属+显示降级）；False=会中批次。
     """
     try:
         from app.core.preprocess import denoise_pcm
@@ -65,19 +64,13 @@ async def meeting_chunk(pcm: bytes, hotwords: str = "", timeout_sec: float | Non
         data: dict = {
             "name_threshold": str(settings.reannotate_name_threshold),
             "max_end_silence_ms": str(settings.pipeline_vad_max_end_silence_ms),
-            "anon_clusters": json.dumps(anon_clusters or []),
-            "anon_next": str(anon_next),
-            "split_gap": str(settings.anon_split_gap),
-            "anon_threshold": str(settings.anon_cluster_threshold),
-            "confirm_count": str(settings.anon_confirm_count),
-            "tail_attach": "true" if settings.anon_tail_attach else "false",
-            "tail_min_sim": str(settings.anon_tail_min_sim),
-            "display_min_sec": str(settings.anon_display_min_sec),
             "final": "true" if final else "false",
             "hw_weight": str(settings.pipeline_hw_weight),
             "punc": "true" if settings.pipeline_punc_enabled else "false",
             "itn": "true" if settings.pipeline_itn_enabled else "false",
         }
+        # 方案 B：anon_clusters/anon_threshold/confirm_count 等匿名聚类参数不再传，
+        # GPU 侧走默认值（空状态），等价于"只做声纹库认人"
         if hotwords:
             data["hotwords"] = hotwords
         async with httpx.AsyncClient(timeout=timeout_sec or settings.pipeline_chunk_timeout_sec) as cli:
