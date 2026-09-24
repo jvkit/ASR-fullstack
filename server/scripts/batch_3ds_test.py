@@ -67,6 +67,9 @@ def enroll_speakers(wav_path: str, rttm_path: Path,
     SIL = b"\x00\x00" * 16000
     for spk in sorted(gt):
         name = spk.replace("_", "-")
+        # 先删后注（2026-09-24 修）：speaker_enroll 是累加制，重复跑注册会漂，
+        # 阈值边缘段翻面导致运行间噪声 ±0.15 DER（详见 tuning_log 方法论修正）
+        httpx.delete(f"{API}/api/speakers/{name}", timeout=30)
         cands = sorted(
             [(s, d) for s, d in gt[spk] if s >= enroll_after and d >= 2],
             key=lambda x: -x[1],

@@ -1,0 +1,36 @@
+{
+  "sys": "/home/jvkit/workspace/meeting/meeting-asr/eval/batch_3ds_M_R003S01C01_segcheck_v2/batch_3ds_M_R003S01C01.rttm",
+  "gt": "/home/jvkit/workspace/meeting/meeting-asr/eval/aishell4/test/TextGrid/M_R003S01C01.rttm",
+  "collar": 0.25,
+  "DER": 6.56,
+  "miss": 0.91,
+  "FA": 0.0,
+  "confusion": 5.65,
+  "nref_frames": 18102,
+  "sys_segments": 256,
+  "sys_labels": [
+    "001-M",
+    "002-M",
+    "003-F",
+    "004-F",
+    "005-F",
+    "006-F",
+    "未识别"
+  ],
+  "gt_speakers": [
+    "001-M",
+    "002-M",
+    "003-F",
+    "004-F",
+    "005-F",
+    "006-F"
+  ],
+  "mapping": {
+    "001-M": "001-M",
+    "002-M": "002-M",
+    "003-F": "003-F",
+    "004-F": "004-F",
+    "005-F": "005-F",
+    "006-F": "006-F"
+  }
+}
