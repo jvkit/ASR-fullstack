@@ -16,8 +16,8 @@ frontend_pid() { pgrep -f "vite preview.*$FRONTEND_PORT" | head -1; }
 cmd_start() {
     if [ -z "$(backend_pid)" ]; then
         echo "启动后端 :$BACKEND_PORT ..."
-        (cd server && nohup "$ROOT/.venv/bin/python" -m uvicorn app.main:app \
-            --host 0.0.0.0 --port $BACKEND_PORT > "$BACKEND_LOG" 2>&1 &)
+        (cd server && setsid nohup "$ROOT/.venv/bin/python" -m uvicorn app.main:app \
+            --host 0.0.0.0 --port $BACKEND_PORT > "$BACKEND_LOG" 2>&1 < /dev/null &)
     else
         echo "后端已在跑 (pid $(backend_pid))"
     fi
@@ -27,7 +27,7 @@ cmd_start() {
             exit 1
         fi
         echo "启动前端静态服务 :$FRONTEND_PORT (vite preview)..."
-        (cd web && nohup npm run preview -- --port $FRONTEND_PORT --host > "$FRONTEND_LOG" 2>&1 &)
+        (cd web && setsid nohup npm run preview -- --port $FRONTEND_PORT --host > "$FRONTEND_LOG" 2>&1 < /dev/null &)
     else
         echo "前端已在跑 (pid $(frontend_pid))"
     fi
