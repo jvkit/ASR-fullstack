@@ -62,7 +62,7 @@ class MeetingSession:
     def __init__(self, meeting_id: str, title: str, recorder: str,
                  replay_of: str | None = None, client_replay: bool = False,
                  online: bool = False, version_mode: str = "both",
-                 source_mode: str = "mic") -> None:
+                 source_mode: str = "mic", hotwords_extra: str = "") -> None:
         self.meeting_id = meeting_id
         self.title = title
         self.recorder = recorder
@@ -97,8 +97,9 @@ class MeetingSession:
         self._chunk_failures = 0       # /meeting_chunk 连续失败次数
         self._batch_loop_task: asyncio.Task | None = None
         self._visual_timer_task: asyncio.Task | None = None  # final-only 模式视觉 OCR 节拍
-        # 热词（FunASR 按空白切分；load_hotwords 逗号格式转空格）
-        self._hotwords = load_hotwords().replace(",", " ")
+        # 热词（FunASR 按空白切分；全局词库 + 本场配置弹窗追加，逗号格式转空格）
+        _hw = f"{load_hotwords()},{hotwords_extra}" if hotwords_extra.strip() else load_hotwords()
+        self._hotwords = _hw.replace(",", " ")
         # 方案 B（2026-09-22 用户拍板）：会中杀掉自研匿名聚类。会中只做声纹库认人：
         # GPU 回传的"说话人N"兜底号原样保留区分度，无意义标签由 display_speaker 降级。
         # 旧状态 anon_clusters/anon_next 已删（self-check：无引用残留）。
@@ -501,11 +502,13 @@ class SessionManager:
 
     def create(self, title: str, recorder: str, replay_of: str | None = None,
                client_replay: bool = False, online: bool = False,
-               version_mode: str = "both", source_mode: str = "mic") -> MeetingSession:
+               version_mode: str = "both", source_mode: str = "mic",
+               hotwords_extra: str = "") -> MeetingSession:
         meeting_id = uuid.uuid4().hex[:12]
         session = MeetingSession(meeting_id, title, recorder, replay_of=replay_of,
                                  client_replay=client_replay, online=online,
-                                 version_mode=version_mode, source_mode=source_mode)
+                                 version_mode=version_mode, source_mode=source_mode,
+                                 hotwords_extra=hotwords_extra)
         self._sessions[meeting_id] = session
         return session
 

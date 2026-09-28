@@ -70,6 +70,7 @@ async def meeting_ws(ws: WebSocket) -> None:
             online=bool(ctrl.get("online")),
             version_mode=str(ctrl.get("version_mode") or "both"),
             source_mode=str(ctrl.get("source_mode") or "mic"),
+            hotwords_extra=str(ctrl.get("hotwords") or ""),
         )
         session.clients.add(ws)
         await session.start()
