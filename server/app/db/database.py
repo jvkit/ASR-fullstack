@@ -7,7 +7,11 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from app.config import settings
 from app.db.models import Base
 
-engine = create_async_engine(settings.database_url, echo=False)
+# pool_pre_ping：回收任务取消时死掉的 aiosqlite 连接（checkout 后查询永久挂起的
+# 事故 2026-09-28：final_pass 首条 SQL 挂死 12min+，根因=池内僵尸连接；
+# pre_ping 检出即弃用换连）。pool_timeout：checkout 上限，防再次静默挂死。
+engine = create_async_engine(settings.database_url, echo=False,
+                             pool_pre_ping=True, pool_timeout=30)
 SessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
 

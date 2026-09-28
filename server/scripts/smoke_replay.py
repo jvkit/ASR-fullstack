@@ -66,7 +66,31 @@ async def main() -> int:
     re_ = con.execute("select count(*) from utterances_re where meeting_id=?", (meeting_id,)).fetchone()[0]
     print(f"DB: utterances={u} summaries={s} utterances_re={re_}")
     ok = u > 0 and s > 0
-    print("✓ 冒烟通过" if ok else "✗ 数据为空")
+
+    # 等会末版收尾（final_pass 在 ended 后后台跑：重标注→会末波→会末总结）
+    print("等待会末版 final_pass 收尾…", flush=True)
+    for i in range(120):  # 最长 30min
+        con = sqlite3.connect(db)
+        fin = con.execute(
+            "select count(*) from summaries where meeting_id=? and scope='final' and seq=0",
+            (meeting_id,)).fetchone()[0]
+        acts = con.execute(
+            "select action_items from meetings where id=?", (meeting_id,)).fetchone()[0]
+        con.close()
+        if fin:
+            print(f"会末终版已出（第 {i*15}s 轮询命中）；meeting.action_items={acts[:120]}")
+            break
+        await asyncio.sleep(15)
+    else:
+        print("✗ 30min 内会末终版未出（检查后端日志）")
+        return 1
+
+    con = sqlite3.connect(db)
+    rows = con.execute(
+        "select seq, scope, substr(title,1,26), length(action_items) from summaries "
+        "where meeting_id=? order by scope, seq", (meeting_id,)).fetchall()
+    print("summaries:", rows)
+    print("✓ 冒烟通过（含会末版）" if ok else "✗ 数据为空")
     return 0 if ok else 1
 
 
