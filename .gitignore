@@ -36,3 +36,21 @@ eval/shuffled/*.wav
 
 # 3D-Speaker 第三方源码（fetch_3dspeaker.sh 拉取，不入库）
 server/third_party/
+
+# 评测台（本地保留，不入库）
+scd_bench/
+
+# 模型权重（走网盘/下载脚本分发，仓库不带权重）
+models/
+
+# eval：只跟踪脚本与调参记录，数据全忽略
+eval/*
+!eval/*.py
+!eval/tuning_log.md
+!eval/README*
+
+# 视频试验素材
+video/spike/assets/
+
+# 生产模型权重与模型缓存（服务器本地放置，不入库）
+server/models/
