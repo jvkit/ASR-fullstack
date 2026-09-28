@@ -54,3 +54,6 @@ video/spike/assets/
 
 # 生产模型权重与模型缓存（服务器本地放置，不入库）
 server/models/
+# 仓库根 scripts 杂项
+scripts/wavs/
+scripts/__pycache__/

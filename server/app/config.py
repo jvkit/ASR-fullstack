@@ -1,12 +1,21 @@
-"""全局配置：从项目根 .env / 环境变量加载。"""
+"""全局配置：从项目根 .env / 环境变量加载。
 
+双配置（2026-09-28 用户拍板）：
+- `.env`        本地开发用（gitignored，不入库）
+- `.env.server` 服务器部署用（入库，内网地址/端口无密钥，pull 下来即能用）
+切换：环境变量 APP_ENV=server|local（缺省 local）。两边键名完全同构，差异只在值，
+防"本地能跑服务器跑不了、改了服务器本地跑不了"。
+"""
+
+import os
 from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # config.py → app/ → server/ → 项目根
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-ENV_FILE = PROJECT_ROOT / ".env"
+APP_ENV = os.environ.get("APP_ENV", "local")
+ENV_FILE = PROJECT_ROOT / (".env.server" if APP_ENV == "server" else ".env")
 
 
 class Settings(BaseSettings):
