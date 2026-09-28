@@ -24,6 +24,11 @@ async def init_db() -> None:
 
         await add_column("utterances", "char_timestamps", "TEXT DEFAULT '[]'")
         await add_column("utterances_re", "text", "TEXT DEFAULT ''")
+        # 双版本架构（2026-09-28）：版本模式 + Summary 版本归属 + 会末待办聚合
+        await add_column("meetings", "version_mode", "VARCHAR(8) DEFAULT 'both'")
+        await add_column("meetings", "source_mode", "VARCHAR(8) DEFAULT 'mic'")
+        await add_column("meetings", "action_items", "TEXT DEFAULT '[]'")
+        await add_column("summaries", "scope", "VARCHAR(8) DEFAULT 'live'")
 
 
 async def get_session() -> AsyncIterator[AsyncSession]:

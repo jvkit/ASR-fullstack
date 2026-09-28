@@ -8,6 +8,12 @@
 
 批次切点用 GPU /vad 找最后一个完整句尾，避免把句子从中间切断；
 会末 flush 把尾巴音频（不足一批）也送出去，不丢结尾内容。
+
+双版本架构（2026-09-28 用户拍板）：实时版（live，会中批次→波次 LLM→段纪要）
+与会末版（final，全录音重跑→波次 LLM→段纪要→会末最终总结）是独立管道、互不
+纠正，只复用声纹库/视觉/录音。version_mode=live|final|both 控制本场出哪版；
+final-only 模式跳过会中批次（不送 GPU/不出 transcript/不跑 enhancer，音频照常
+累积存档），视觉 OCR 改由 120s 定时任务驱动（见 _visual_timer_loop）。
 """
 
 from __future__ import annotations
@@ -55,7 +61,8 @@ def display_speaker(spk: str, *, keep_anon: bool = False) -> str:
 class MeetingSession:
     def __init__(self, meeting_id: str, title: str, recorder: str,
                  replay_of: str | None = None, client_replay: bool = False,
-                 online: bool = False) -> None:
+                 online: bool = False, version_mode: str = "both",
+                 source_mode: str = "mic") -> None:
         self.meeting_id = meeting_id
         self.title = title
         self.recorder = recorder
@@ -66,6 +73,12 @@ class MeetingSession:
         self.buffer = UtteranceBuffer()
         self._stopped = False
         self._lock = asyncio.Lock()
+
+        # 双版本架构（2026-09-28 用户拍板）：live=只会中实时版 | final=只会末版 |
+        # both=两版都出。非法值回退 both——旧前端/重放脚本不传新字段时行为与改造前一致
+        self.version_mode = version_mode if version_mode in ("live", "final", "both") else "both"
+        # 采集来源：mic=现场麦克风 | online=线上会议（屏幕共享帧走视觉通道）
+        self.source_mode = source_mode if source_mode in ("mic", "online") else "mic"
 
         # 视觉通道帧缓冲（线上会议/摄像头帧收发，波次触发时 take_group）
         from app.core.visual_buffer import VisualBuffer
@@ -83,6 +96,7 @@ class MeetingSession:
         self._processed = 0            # 已送出批次的字节偏移
         self._chunk_failures = 0       # /meeting_chunk 连续失败次数
         self._batch_loop_task: asyncio.Task | None = None
+        self._visual_timer_task: asyncio.Task | None = None  # final-only 模式视觉 OCR 节拍
         # 热词（FunASR 按空白切分；load_hotwords 逗号格式转空格）
         self._hotwords = load_hotwords().replace(",", " ")
         # 方案 B（2026-09-22 用户拍板）：会中杀掉自研匿名聚类。会中只做声纹库认人：
@@ -106,19 +120,28 @@ class MeetingSession:
 
     async def start(self) -> None:
         async with SessionLocal() as db:
-            db.add(Meeting(id=self.meeting_id, title=self.title, recorder=self.recorder))
+            db.add(Meeting(id=self.meeting_id, title=self.title, recorder=self.recorder,
+                           version_mode=self.version_mode, source_mode=self.source_mode))
             await db.commit()
-        self._batch_loop_task = asyncio.create_task(self._batch_loop())
-        logger.info("meeting %s started (nonrealtime batches: min=%ss max=%ss tick=%ss)",
-                    self.meeting_id, settings.pipeline_batch_min_sec,
+        # 双版本架构（2026-09-28）：live/both 走会中批次循环；final-only 跳过会中处理
+        # （不送 GPU、不出 transcript、不跑 enhancer），音频只累积存档 + 视觉改由
+        # 120s 定时任务驱动 OCR（final 模式的会末版按时间范围复用这些 VisualNote）
+        if self.version_mode in ("live", "both"):
+            self._batch_loop_task = asyncio.create_task(self._batch_loop())
+        if self.version_mode == "final" and settings.visual_enabled and self.visual_app:
+            self._visual_timer_task = asyncio.create_task(self._visual_timer_loop())
+        logger.info("meeting %s started (mode=%s/%s, nonrealtime batches: min=%ss max=%ss tick=%ss)",
+                    self.meeting_id, self.version_mode, self.source_mode,
+                    settings.pipeline_batch_min_sec,
                     settings.pipeline_batch_max_sec, settings.pipeline_tick_sec)
 
     async def stop(self) -> None:
         """结束会议：立刻落库 ended 并广播，重活全部转后台。
 
         同步段（用户等待的部分）：存录音 → 落库 ended + 广播。
-        后台段（_finalize）：flush 尾巴批次 → 等在飞增强收尾 → 会末总结/标签/属性
-        → 会末全场重跑（权威终版）。LLM 网关抽风时这些步骤慢，但用户点结束立即看到结束。
+        后台段（_finalize，模式感知）：live → flush 尾巴批次 + 实时段纪要归约终版；
+        final → 全场重跑 + 会末波次 + 会末最终总结（见 final_pass）。
+        LLM 网关抽风时这些步骤慢，但用户点结束立即看到结束。
         """
         async with self._lock:
             if self._stopped:
@@ -129,6 +152,13 @@ class MeetingSession:
             self._batch_loop_task.cancel()
             try:
                 await self._batch_loop_task
+            except asyncio.CancelledError:
+                pass
+
+        if self._visual_timer_task:
+            self._visual_timer_task.cancel()
+            try:
+                await self._visual_timer_task
             except asyncio.CancelledError:
                 pass
 
@@ -146,89 +176,139 @@ class MeetingSession:
         asyncio.create_task(self._finalize())
 
     async def _finalize(self) -> None:
-        """会末收尾（后台）：尾巴批次 → 最终总结/标题/标签/属性 + 全场重跑。失败仅记日志。"""
+        """会末收尾（后台，2026-09-28 起模式感知）：live → 尾巴批 flush + 实时段纪要
+        归约终版（scope='live'）；final → 全场重跑 + 会末波次 + 会末最终总结
+        （见 final_pass.run_final_pass）。两版独立管道互不纠正，各自独立 try，
+        一边失败不影响另一边。失败仅记日志。"""
         session_id = self.meeting_id
-        try:
-            # 尾巴音频分块 flush（每块最多 60s）：高速重放时积压可能有几分钟，
-            # 一口吞会超时；普通会议通常一块就够
-            while (len(self._audio) - self._processed) / 32 >= 1000:  # 剩余 ≥1s
-                before = self._processed
-                await self._run_batch(force=True, max_chunk_ms=60_000)
-                if self._processed == before:
-                    break  # 失败重试无进展（连续失败 3 次后丢弃），防死循环
+        if self.version_mode in ("live", "both"):
+            try:
+                await self._finalize_live(session_id)
+            except Exception:
+                logger.exception("meeting %s live finalize failed", session_id)
+        if self.version_mode in ("final", "both"):
+            try:
+                from app.core.final_pass import run_final_pass
+                await run_final_pass(self)
+            except Exception:
+                logger.exception("meeting %s final pass failed", session_id)
 
-            # 会末总结：输入 = 全部段纪要拼接（不含原始转写全文）。
-            # 旧实现在此有「全文 >6000 字就丢掉全文、只用滚动摘要」的硬兜底——
-            # 现已不需要：段纪要归约本身就是分层压缩，输入规模 = 波数 × 每波纪要，
-            # 与会议原始文本量解耦（6h 会议约 94k token，chat 模型 256k 窗口内）。
-            segments_text = await self.enhancer.finish()
-            result = await llm_client.extract_final_attributes(segments_text)
+    async def _finalize_live(self, session_id: str) -> None:
+        """实时版终版：flush 尾巴批 → enhancer.finish() → 段纪要归约出标题/总结/标签/属性。
 
-            final_title = result["title"]
-            # 重放测试会议：标题保留「重放测试」标记（LLM 生成标题后仍追加，便于区分）
-            if (self.replay_of or self.client_replay) and final_title and "重放测试" not in final_title:
-                final_title = f"{final_title}（重放测试）"
-            # LLM 失败兜底：直接用段纪要拼接当总结（信息全在，只是没归约）
-            final_summary = result["summary"] or segments_text
-            final_tags = result["tags"][:settings.final_tags_count]
-            # 属性：滚动提取的 + 会末提取的合并（key 去重，滚动版优先）
-            merged: dict[str, str] = {}
-            for a in result["attributes"]:
-                if isinstance(a, dict) and a.get("key"):
-                    merged[str(a["key"])] = str(a.get("value", ""))
-            for a in self.final_attributes:
-                merged[a["key"]] = a["value"]
+        逻辑与双版本改造前完全一致，仅多落 scope='live'、Summary/广播带结构化待办、
+        meeting.action_items 存实时版聚合值（final/both 模式会由会末版覆盖为准）。
+        """
+        # 尾巴音频分块 flush（每块最多 60s）：高速重放时积压可能有几分钟，
+        # 一口吞会超时；普通会议通常一块就够
+        while (len(self._audio) - self._processed) / 32 >= 1000:  # 剩余 ≥1s
+            before = self._processed
+            await self._run_batch(force=True, max_chunk_ms=60_000)
+            if self._processed == before:
+                break  # 失败重试无进展（连续失败 3 次后丢弃），防死循环
 
+        # 会末总结：输入 = 全部段纪要拼接（不含原始转写全文）。
+        # 旧实现在此有「全文 >6000 字就丢掉全文、只用滚动摘要」的硬兜底——
+        # 现已不需要：段纪要归约本身就是分层压缩，输入规模 = 波数 × 每波纪要，
+        # 与会议原始文本量解耦（6h 会议约 94k token，chat 模型 256k 窗口内）。
+        segments_text = await self.enhancer.finish()
+        result = await llm_client.extract_final_attributes(segments_text)
+
+        final_title = result["title"]
+        # 重放测试会议：标题保留「重放测试」标记（LLM 生成标题后仍追加，便于区分）
+        if (self.replay_of or self.client_replay) and final_title and "重放测试" not in final_title:
+            final_title = f"{final_title}（重放测试）"
+        # LLM 失败兜底：直接用段纪要拼接当总结（信息全在，只是没归约）
+        final_summary = result["summary"] or segments_text
+        final_tags = result["tags"][:settings.final_tags_count]
+        # 属性：滚动提取的 + 会末提取的合并（key 去重，滚动版优先）
+        merged: dict[str, str] = {}
+        for a in result["attributes"]:
+            if isinstance(a, dict) and a.get("key"):
+                merged[str(a["key"])] = str(a.get("value", ""))
+        for a in self.final_attributes:
+            merged[a["key"]] = a["value"]
+        # 结构化待办（2026-09-28）：LLM 输出的 action_items 已按 quote 去重
+        live_actions = llm_client.dedup_action_items(result.get("action_items") or [])
+
+        async with SessionLocal() as db:
+            meeting = await db.get(Meeting, session_id)
+            if meeting:
+                if final_title:
+                    meeting.title = final_title
+                if final_tags:
+                    meeting.tags = json.dumps(final_tags, ensure_ascii=False)
+                if merged:
+                    meeting.attributes = json.dumps(
+                        [{"key": k, "value": v} for k, v in merged.items()],
+                        ensure_ascii=False,
+                    )
+                # live-only 时这就是权威待办；final/both 由会末版覆盖（用户拍板）
+                meeting.action_items = json.dumps(live_actions, ensure_ascii=False)
+                await db.commit()
+
+        # 会末大总结落一条 Summary（可审计、供报告导出）。
+        # **seq=0 是终版专用号**：段纪要是 1..N，故不撞号，且 order_by(seq) 让
+        # 终版排在最前（先总结后分章，前端 MeetingDetail 也是按 seq===0 认终版）。
+        # 旧实现用 session 自有的 summary_seq（从 0 起 +1 → 永远是 1），既与第一段
+        # 纪要撞号，也让前端的 seq===0 判断从未生效。
+        if final_summary:
             async with SessionLocal() as db:
-                meeting = await db.get(Meeting, session_id)
-                if meeting:
-                    if final_title:
-                        meeting.title = final_title
-                    if final_tags:
-                        meeting.tags = json.dumps(final_tags, ensure_ascii=False)
-                    if merged:
-                        meeting.attributes = json.dumps(
-                            [{"key": k, "value": v} for k, v in merged.items()],
-                            ensure_ascii=False,
-                        )
-                    await db.commit()
+                db.add(Summary(
+                    meeting_id=session_id,
+                    seq=0,
+                    scope="live",     # 实时版终版（会末版终版 scope='final'，见 final_pass）
+                    window_text="",   # 终版输入是段纪要，不是原文窗口
+                    content=final_summary,
+                    action_items=json.dumps(live_actions, ensure_ascii=False),
+                    attributes="[]",
+                    title=final_title or "最终总结",
+                ))
+                await db.commit()
+            await self.broadcast({
+                "type": "summary",
+                "seq": 0,
+                "scope": "live",
+                "final": True,
+                "title": final_title or "最终总结",
+                "points": [p.lstrip("· ").strip() for p in final_summary.splitlines() if p.strip()],
+                "action_items": live_actions,
+                "attributes": [{"key": k, "value": v} for k, v in merged.items()],
+            })
+        logger.info("meeting %s live finalized", session_id)
 
-            # 会末大总结落一条 Summary（可审计、供报告导出）。
-            # **seq=0 是终版专用号**：段纪要是 1..N，故不撞号，且 order_by(seq) 让
-            # 终版排在最前（先总结后分章，前端 MeetingDetail 也是按 seq===0 认终版）。
-            # 旧实现用 session 自有的 summary_seq（从 0 起 +1 → 永远是 1），既与第一段
-            # 纪要撞号，也让前端的 seq===0 判断从未生效。
-            if final_summary:
-                async with SessionLocal() as db:
-                    db.add(Summary(
-                        meeting_id=session_id,
-                        seq=0,
-                        window_text="",   # 终版输入是段纪要，不是原文窗口
-                        content=final_summary,
-                        action_items="[]",
-                        attributes="[]",
-                        title=final_title or "最终总结",
-                    ))
-                    await db.commit()
-                await self.broadcast({
-                    "type": "summary",
-                    "seq": 0,
-                    "final": True,
-                    "title": final_title or "最终总结",
-                    "points": [p.lstrip("· ").strip() for p in final_summary.splitlines() if p.strip()],
-                    "action_items": [],
-                    "attributes": [{"key": k, "value": v} for k, v in merged.items()],
-                })
-            logger.info("meeting %s finalized", session_id)
-        except Exception:
-            logger.exception("meeting %s finalize failed", session_id)
+    async def _visual_timer_loop(self) -> None:
+        """final-only 模式的视觉 OCR 节拍器（2026-09-28）。
 
-        # 会末全场重跑（3D-Speaker 唯一生产路径）→ utterances_re 权威终版
-        from app.core.reannotate import reannotate
+        final 模式没有会中波次，enhancer 不驱动 take_group，视觉 OCR 缺节拍——这里
+        每 visual_note_interval_sec（默认 120s）取走缓冲帧送 OCR 并落 VisualNote，
+        作为会末版按时间范围关联复用的唯一 OCR 来源。失败仅记日志（与实时版一致，
+        不阻塞任何主流程）；暂停期间不打拍。
+        """
+        from app.core.enhancer import persist_visual_note
+        from app.core.visual_ocr import visual_ocr
 
-        pcm = bytes(self._audio)
-        if await reannotate(session_id, pcm):
-            await self.broadcast({"type": "reannotated", "meeting_id": session_id})
+        try:
+            while not self._stopped:
+                await asyncio.sleep(settings.visual_note_interval_sec)
+                if self.paused or not self.visual_app:
+                    continue
+                try:
+                    frames = await self.visual.take_group()
+                    if not frames:
+                        continue
+                    text = await visual_ocr(frames, app=self.visual_app)
+                    if text:
+                        await persist_visual_note(self.meeting_id,
+                                                  frames[0][0], frames[-1][0], text)
+                        logger.info("meeting %s visual note %d-%dms (%d 帧, %d 字)",
+                                    self.meeting_id, frames[0][0], frames[-1][0],
+                                    len(frames), len(text))
+                except Exception:
+                    logger.exception("meeting %s visual timer tick failed（不阻塞）",
+                                     self.meeting_id)
+        except asyncio.CancelledError:
+            raise
 
     # ---------- 音频上行与批次调度 ----------
 
@@ -420,10 +500,12 @@ class SessionManager:
         self._sessions: dict[str, MeetingSession] = {}
 
     def create(self, title: str, recorder: str, replay_of: str | None = None,
-               client_replay: bool = False, online: bool = False) -> MeetingSession:
+               client_replay: bool = False, online: bool = False,
+               version_mode: str = "both", source_mode: str = "mic") -> MeetingSession:
         meeting_id = uuid.uuid4().hex[:12]
         session = MeetingSession(meeting_id, title, recorder, replay_of=replay_of,
-                                 client_replay=client_replay, online=online)
+                                 client_replay=client_replay, online=online,
+                                 version_mode=version_mode, source_mode=source_mode)
         self._sessions[meeting_id] = session
         return session
 

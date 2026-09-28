@@ -34,6 +34,23 @@ def _mmss(ms: int) -> str:
     return f"{s // 60:02d}:{s % 60:02d}"
 
 
+async def persist_visual_note(meeting_id: str, start_ms: int, end_ms: int, text: str) -> None:
+    """视觉 OCR 文本落 VisualNote 存档（实时版波次与 final-only 定时任务共用入口）。
+
+    会末版按 [start_ms, end_ms] 时间范围关联复用，不重跑 OCR（2026-09-28 双版本
+    架构：两版只复用视觉结果）。空文本不落库。
+    """
+    if not text.strip():
+        return
+    from app.db.database import SessionLocal
+    from app.db.models import VisualNote
+
+    async with SessionLocal() as db:
+        db.add(VisualNote(meeting_id=meeting_id, start_ms=int(start_ms),
+                          end_ms=int(end_ms), text=text))
+        await db.commit()
+
+
 class BatchEnhancer:
     """挂在 MeetingSession 上的波段增强器。所有回调非阻塞，失败仅记日志。"""
 
@@ -104,6 +121,11 @@ class BatchEnhancer:
                 frames = await self._session.visual.take_group()
                 if frames:
                     ocr_text = await visual_ocr(frames, app=self._session.visual_app)
+                    if ocr_text:
+                        # OCR 结果除进本波 prompt 外落 VisualNote 存档：会末版按时间范围
+                        # 关联复用，不重跑 OCR（2026-09-28 双版本架构）
+                        await persist_visual_note(self._session.meeting_id,
+                                                  frames[0][0], frames[-1][0], ocr_text)
             except Exception:
                 logger.exception("visual wave failed for %s（不阻塞纪要）",
                                  self._session.meeting_id)
@@ -214,6 +236,9 @@ class BatchEnhancer:
                 "end_ms": items[-1].end_ms,
                 # 本波原文留档（可审计：这段纪要是基于什么原文生成的）
                 "window_text": "\n".join(f"{s}: {t}" for s, t in cur_raw),
+                # 结构化待办（2026-09-28）：LLM 按 task/assignee/due/quote 四字段输出，
+                # 会末待办聚合 = 各波 action_items 拼接去重（quote 相同视为同一条）
+                "action_items": result.get("action_items") or [],
             }
             self._segments.append(seg)
             await self._persist_segment(seg)
@@ -249,15 +274,19 @@ class BatchEnhancer:
                     Summary.__table__.update()
                     .where(Summary.meeting_id == self._session.meeting_id)
                     .where(Summary.seq == seg["seq"])
-                    .values(content=seg["content"], title=seg["title"])
+                    .values(content=seg["content"], title=seg["title"],
+                            action_items=json.dumps(seg.get("action_items") or [],
+                                                    ensure_ascii=False))
                 )
             else:
                 db.add(Summary(
                     meeting_id=self._session.meeting_id,
                     seq=seg["seq"],
+                    scope="live",   # 实时波段纪要（会末版段纪要 scope='final'，见 final_pass）
                     window_text=seg["window_text"],
                     content=seg["content"],
-                    action_items="[]",
+                    action_items=json.dumps(seg.get("action_items") or [],
+                                            ensure_ascii=False),
                     attributes="[]",
                     title=seg["title"],
                 ))
@@ -268,10 +297,11 @@ class BatchEnhancer:
         await self._session.broadcast({
             "type": "summary",
             "seq": seg["seq"],
+            "scope": "live",            # 前端按 scope 分 tab（2026-09-28 双版本架构）
             "final": final,
             "title": seg["title"],
             "points": points,
-            "action_items": [],
+            "action_items": seg.get("action_items") or [],
             "attributes": [],
         })
 
@@ -355,6 +385,8 @@ async def _llm_enhance(ctx_summaries: list[str], prev_summary: str,
             "summary": str(data.get("summary", "")).strip(),
             "title": str(data.get("title", "")).strip(),
             "prev_summary": str(data.get("prev_summary", "")).strip(),
+            # 结构化待办（2026-09-28）：task/assignee/due/quote 四字段，经 client 归一化
+            "action_items": llm_client.parse_action_items(data.get("action_items")),
         }
     except Exception:
         logger.exception("llm enhance failed")

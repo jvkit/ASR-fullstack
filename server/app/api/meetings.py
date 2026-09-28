@@ -77,6 +77,10 @@ async def meeting_detail(meeting_id: str) -> dict:
             "attributes": json.loads(meeting.attributes or "[]"),
             "tags": json.loads(meeting.tags or "[]"),
             "reannotated": bool(meeting.reannotated),
+            # 双版本架构（2026-09-28）：版本模式 / 采集来源 / 权威待办清单（会末版为准）
+            "version_mode": meeting.version_mode,
+            "source_mode": meeting.source_mode,
+            "action_items": json.loads(meeting.action_items or "[]"),
             # 有录音文件才有回放地址
             "audio_url": (
                 f"/api/meetings/{meeting_id}/audio"
@@ -193,14 +197,18 @@ async def meeting_audio_denoised(meeting_id: str) -> FileResponse:
 
 
 @router.get("/meetings/{meeting_id}/summaries")
-async def meeting_summaries(meeting_id: str) -> list[dict]:
+async def meeting_summaries(meeting_id: str, scope: str | None = None) -> list[dict]:
+    """段纪要/终版总结查询。scope=live|final 过滤版本（2026-09-28 双版本架构，
+    前端按 scope 分 tab）；缺省全返，每条带 scope 字段自行区分。"""
     async with SessionLocal() as db:
-        rows = (await db.execute(
-            select(Summary).where(Summary.meeting_id == meeting_id).order_by(Summary.seq)
-        )).scalars().all()
+        q = select(Summary).where(Summary.meeting_id == meeting_id)
+        if scope in ("live", "final"):
+            q = q.where(Summary.scope == scope)
+        rows = (await db.execute(q.order_by(Summary.seq))).scalars().all()
         return [
             {
                 "seq": s.seq,
+                "scope": s.scope,
                 "title": s.title,
                 "content": s.content,
                 "action_items": json.loads(s.action_items or "[]"),

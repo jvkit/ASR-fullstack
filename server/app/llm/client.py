@@ -42,14 +42,16 @@ client = OpenAI(
 
 
 async def extract_final_attributes(segments_text: str) -> dict:
-    """会议结束时对【各波段纪要】提取主题 + 完整总结 + 标签 + 动态属性。
+    """会议结束时对【各波段纪要】提取主题 + 完整总结 + 标签 + 动态属性 + 待办清单。
 
     segments_text 是全部段纪要的拼接（不是原始转写全文）——会末总结只看段纪要，
     故输入规模 = 波数 × 每波纪要，与会议时长的原始文本量解耦。
-    返回 {"title": str, "summary": str, "tags": list[str], "attributes": list[{"key","value"}]}
+    返回 {"title", "summary", "tags", "attributes", "action_items"}；
+    action_items 为结构化待办 [{task,assignee,due,quote}]（2026-09-28 新增，
+    实时/会末两个版本的最终总结共用本函数与同一套 prompt）。
     """
     if not segments_text.strip():
-        return {"title": "", "summary": "", "tags": [], "attributes": []}
+        return {"title": "", "summary": "", "tags": [], "attributes": [], "action_items": []}
     messages = prompts.build_final_attributes_messages(segments_text)
     try:
         resp = await asyncio.to_thread(
@@ -66,10 +68,43 @@ async def extract_final_attributes(segments_text: str) -> dict:
             "summary": str(data.get("summary", "")),
             "tags": [str(t) for t in data.get("tags", [])],
             "attributes": data.get("attributes", []),
+            "action_items": parse_action_items(data.get("action_items")),
         }
     except Exception:
         logger.exception("extract_final_attributes failed")
-        return {"title": "", "summary": "", "tags": [], "attributes": []}
+        return {"title": "", "summary": "", "tags": [], "attributes": [], "action_items": []}
+
+
+def parse_action_items(raw: object) -> list[dict]:
+    """波次/会末 LLM 输出的 action_items 归一化：只保留 dict 项，补齐四字段为 str。"""
+    if not isinstance(raw, list):
+        return []
+    out: list[dict] = []
+    for a in raw:
+        if not isinstance(a, dict):
+            continue
+        out.append({
+            "task": str(a.get("task", "")).strip(),
+            "assignee": str(a.get("assignee", "")).strip(),
+            "due": str(a.get("due", "")).strip(),
+            "quote": str(a.get("quote", "")).strip(),
+        })
+    return out
+
+
+def dedup_action_items(items: list[dict]) -> list[dict]:
+    """最终总结待办清单 = 全部波次 action_items 拼接去重（quote 相同视为同一条，
+    2026-09-28 用户定规）；quote 为空的条目退化为整串去重。"""
+    seen: set[str] = set()
+    out: list[dict] = []
+    for a in items:
+        quote = str(a.get("quote", ""))
+        key = quote if quote else json.dumps(a, ensure_ascii=False, sort_keys=True)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(a)
+    return out
 
 
 def build_enhance_messages(ctx_summaries: list[str], prev_summary: str,

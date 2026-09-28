@@ -2,7 +2,10 @@
 
 协议：
     客户端第一条消息（JSON 文本）：
-        {"type": "start", "title": "周会", "replay_of": "<可选：历史会议id>"}
+        {"type": "start", "title": "周会", "replay_of": "<可选：历史会议id>",
+         "online": false, "version_mode": "both", "source_mode": "mic"}
+        version_mode: live|final|both（2026-09-28 双版本架构；缺省 both，旧客户端兼容）
+        source_mode:  mic|online（线上会议屏幕帧走视觉通道）
     之后：
         二进制帧      → PCM int16 16kHz 音频块
         {"type":"stop"} → 结束会议
@@ -11,8 +14,10 @@
         {"type": "started", "meeting_id"}
         {"type": "transcript", "seq", "speaker", "text", "start_ms", "end_ms"}  批次句子（带说话人）
         {"type": "transcript_update", "seq", "speaker", "text", "corrected"}    LLM 纠错/定稿回写
-        {"type": "summary", "seq", "title", "points", "action_items", "final"}
+        {"type": "summary", "seq", "scope", "title", "points", "action_items", "final"}
         {"type": "ended", "meeting_id"}
+        {"type": "final_progress", "stage", "pct"}   会末版进度（reannotate/waves/summary/done）
+        {"type": "final_done", "meeting_id"}         会末版全部完成
         {"type": "reannotated", "meeting_id"}   会末终版已生成（历史页查看）
         {"type": "error", "message"}
 
@@ -63,6 +68,8 @@ async def meeting_ws(ws: WebSocket) -> None:
             replay_of=replay_of,
             client_replay=bool(ctrl.get("client_replay")),
             online=bool(ctrl.get("online")),
+            version_mode=str(ctrl.get("version_mode") or "both"),
+            source_mode=str(ctrl.get("source_mode") or "mic"),
         )
         session.clients.add(ws)
         await session.start()

@@ -101,6 +101,13 @@ class Settings(BaseSettings):
     # 会议结束时不足一波的尾巴强制跑一次（否则最后 1-2 分钟永不纠错、不进纪要）
     summary_flush_tail: bool = True
 
+    # ---------- 会末版（final）波次纪要（双版本架构 2026-09-28） ----------
+    # 会末版 = 会议结束后全录音重跑（reannotate）的 utterances_re 按固定时间窗分波，
+    # 逐波走与实时版同一套波次 LLM（纠错写回 utterances_re + 段纪要 scope='final'）。
+    # 用 120s 固定窗而非对齐 OCR/批次边界：固定窗简单可靠、VisualNote 按时间范围
+    # 关联不需要边界对齐。
+    final_wave_sec: float = 120.0
+
     # LLM（内网 vLLM / mymodule 网关）
     llm_base_url: str = "http://127.0.0.1:4000/v1"
     llm_api_key: str = ""
@@ -157,6 +164,9 @@ class Settings(BaseSettings):
     visual_llm_timeout_sec: int = 300         # 多帧读图分钟级，给足余量
     visual_prompt_app: str = "online"         # online | offline（提示词模板选择）
     visual_max_buffer_frames: int = 24        # 帧缓冲上限（≈4min 积压容量，防雪球）
+    # final-only 模式的视觉 OCR 节拍（2026-09-28）：final 模式没有会中波次，OCR 缺节拍器，
+    # 由 session 每 120s 定时 take_group → OCR → 落 VisualNote（会末版按时间复用）
+    visual_note_interval_sec: float = 120.0
 
 
 def load_hotwords() -> str:
