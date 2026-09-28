@@ -51,6 +51,10 @@ def denoise_pcm(pcm: bytes) -> bytes:
     try:
         import torch
 
+        if len(pcm) % 2:  # 奇数字节防御（WS 帧/flush 切边可能产生）：丢尾字节
+            pcm = pcm[: len(pcm) - 1]
+            if not pcm:
+                return pcm
         model = _load()
         wav = np.frombuffer(pcm, dtype=np.int16).astype(np.float32) / 32768.0
         if len(wav) < 512:
