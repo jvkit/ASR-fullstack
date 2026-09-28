@@ -42,8 +42,8 @@ cmd_stop() {
 
 cmd_status() {
     b=$(backend_pid); f=$(frontend_pid)
-    echo "后端  :$BACKEND_PORT  ${b:+运行中 (pid $b)}${b:-未运行}  日志 $BACKEND_LOG"
-    echo "前端  :$FRONTEND_PORT  ${f:+运行中 (pid $f)}${f:-未运行}  日志 $FRONTEND_LOG"
+    if [ -n "$b" ]; then echo "后端  :$BACKEND_PORT  运行中 (pid $b)  日志 $BACKEND_LOG"; else echo "后端  :$BACKEND_PORT  未运行"; fi
+    if [ -n "$f" ]; then echo "前端  :$FRONTEND_PORT  运行中 (pid $f)  日志 $FRONTEND_LOG"; else echo "前端  :$FRONTEND_PORT  未运行"; fi
     curl -s -m 3 "http://127.0.0.1:$BACKEND_PORT/api/speakers" >/dev/null \
         && echo "健康检查: 后端 OK" || echo "健康检查: 后端无响应"
 }
