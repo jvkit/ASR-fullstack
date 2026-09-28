@@ -10,7 +10,7 @@ import SpeakerManage from './components/SpeakerManage.vue'
 import SummaryPanel from './components/SummaryPanel.vue'
 import { MicRecorder } from './ws/audio'
 import { ScreenFrameCapture } from './ws/screen'
-import { MeetingWs, type ServerMessage } from './ws/client'
+import { MeetingWs, type ServerMessage, type SourceMode, type VersionMode } from './ws/client'
 
 interface Utterance {
   seq: number
@@ -21,11 +21,30 @@ interface Utterance {
 
 interface SummaryItem {
   seq: number
+  scope: string
   title: string
   points: string[]
-  actionItems: { who: string; what: string; due?: string; status?: string }[]
+  // 2026-09-28 起波次 LLM 输出结构化待办 {task,assignee,due,quote}；旧数据是 {who,what,due,status}
+  actionItems: { who?: string; what?: string; task?: string; assignee?: string; due?: string; status?: string; quote?: string }[]
   attributes: { key: string; value: string }[]
   final: boolean
+}
+
+interface StartConfig {
+  title: string
+  online: boolean
+  versionMode: VersionMode
+  sourceMode: SourceMode
+  hotwords: string
+}
+
+// 会末版进度（final_progress 推送；详情页另有轮询兜底，这里覆盖"刚结束还在会议页"的场景）
+const finalProgress = ref<{ stage: string; pct: number } | null>(null)
+const FINAL_STAGE_TEXT: Record<string, string> = {
+  reannotate: '全场重跑（分人+转写）',
+  waves: '会末波次纪要',
+  summary: '会末最终总结',
+  done: '完成',
 }
 
 type View = 'live' | 'list' | 'detail' | 'speakers'
@@ -54,6 +73,7 @@ const mic = reactive(new MicRecorder())
 const ws = reactive(new MeetingWs())
 // 线上会议视觉通道：额外抓屏（系统声+屏幕同一次 getDisplayMedia），定时抽帧上行 OCR
 const onlineMode = ref(false)
+const versionMode = ref<VersionMode>('both') // 本场开会配置（双版本架构，默认都走）
 const screenCapture = new ScreenFrameCapture()
 let pendingDisplayStream: MediaStream | null = null
 
@@ -97,21 +117,35 @@ function handleMessage(msg: ServerMessage) {
       break
     }
     case 'summary': {
-      // 按 seq upsert：段纪要可被下一波订正（服务端会重发同 seq），
-      // 无脑 push 会让订正显示成重复条目
+      // 按 (scope, seq, final) upsert：段纪要可被下一波订正（服务端会重发同 seq），
+      // 无脑 push 会让订正显示成重复条目。会中视图只收 live scope，final 防御性丢弃
+      if (msg.scope === 'final') break
       const row = {
         seq: msg.seq,
+        scope: msg.scope || 'live',
         title: msg.title,
         points: msg.points,
         actionItems: msg.action_items as SummaryItem['actionItems'],
         attributes: msg.attributes as SummaryItem['attributes'],
         final: msg.final,
       }
-      const si = summaries.value.findIndex((s) => s.seq === msg.seq && s.final === msg.final)
+      const si = summaries.value.findIndex(
+        (s) => s.scope === row.scope && s.seq === msg.seq && s.final === msg.final,
+      )
       if (si >= 0) summaries.value[si] = row
       else summaries.value.push(row)
       break
     }
+    case 'final_progress':
+      // 会末版重跑进度（只在 final/both 模式出现）：会中视图展示轻量进度条
+      if (versionMode.value !== 'final' && versionMode.value !== 'both') break
+      finalProgress.value = { stage: msg.stage, pct: msg.pct }
+      break
+    case 'final_done':
+      finalProgress.value = null
+      showToast({ message: '会末版已生成，可在历史会议查看', type: 'success', duration: 3000 })
+      meetingCount.value++
+      break
     case 'attributes':
       liveAttrs.value = msg.attributes || []
       break
@@ -136,17 +170,19 @@ function handleMessage(msg: ServerMessage) {
   }
 }
 
-async function onStart(payload: { title: string; online?: boolean }) {
+async function onStart(payload: StartConfig) {
   if (insecure.value) {
     showToast({ message: 'http 访问下浏览器禁止麦克风，请用 https 地址打开', type: 'fail', duration: 4000 })
     return
   }
-  onlineMode.value = !!payload.online
+  onlineMode.value = payload.online
+  versionMode.value = payload.versionMode
   errorMsg.value = ''
   utterances.value = []
   summaries.value = []
   liveAttrs.value = []
   speakerColorMap.clear()
+  finalProgress.value = null
 
   await ws.connect()
   ws.onMessage(handleMessage)
@@ -183,7 +219,12 @@ async function onStart(payload: { title: string; online?: boolean }) {
     ws.close()
     return
   }
-  ws.start(payload.title, { online: onlineMode.value })
+  ws.start(payload.title, {
+    online: onlineMode.value,
+    versionMode: versionMode.value,
+    sourceMode: payload.sourceMode,
+    hotwords: payload.hotwords,
+  })
   recording.value = true
 }
 
@@ -301,6 +342,19 @@ onMounted(() => {
       text="当前为 http 访问，浏览器禁止使用麦克风。请用 https:// 开头的地址访问（首次有证书警告，点继续访问即可）"
     />
 
+    <!-- 线上会议麦克风门控状态横幅（2026-09-28 P3：漏开 = 自己声音全丢，必须显眼） -->
+    <van-notice-bar
+      v-if="recording && onlineMode"
+      :scrollable="false"
+      :wrapable="!mic.micOn"
+      color="#fff"
+      :background="mic.micOn ? '#07c160' : '#ed6a0c'"
+      :left-icon="mic.micOn ? 'volume-o' : 'warning-o'"
+      :text="mic.micOn
+        ? '麦克风上行中：对方能听到你，你的发言会进入转写'
+        : '闭麦中：对方听不到你的声音，转写将缺失你的发言——在下方打开「我开麦了」'"
+    />
+
     <main class="app-main">
       <!-- 重放测试视图（历史录音模拟实时开会） -->
       <template v-if="view === 'live' && replaying">
@@ -327,6 +381,10 @@ onMounted(() => {
             {{ a.key }}：{{ a.value }}
           </van-tag>
         </div>
+        <div v-if="finalProgress" class="final-progress">
+          <span class="fp-text">会末版生成中：{{ FINAL_STAGE_TEXT[finalProgress.stage] || finalProgress.stage }}</span>
+          <van-progress :percentage="finalProgress.pct" :pivot-text="`${finalProgress.pct}%`" stroke-width="6" />
+        </div>
         <div class="live-panels">
           <LiveTranscript :utterances="utterances" :speakers="knownSpeakers" :color-of="colorOf" />
           <SummaryPanel :summaries="summaries" :meeting-id="meetingId" />
@@ -346,6 +404,7 @@ onMounted(() => {
           @resume="onResume"
           @stop="onStop"
           @mic-toggle="(on: boolean) => mic.setMicEnabled(on)"
+          @goto-speakers="view = 'speakers'"
         />
 
         <div v-if="liveAttrs.length" class="live-attrs">
@@ -358,6 +417,11 @@ onMounted(() => {
           >
             {{ a.key }}：{{ a.value }}
           </van-tag>
+        </div>
+
+        <div v-if="finalProgress" class="final-progress">
+          <span class="fp-text">会末版生成中：{{ FINAL_STAGE_TEXT[finalProgress.stage] || finalProgress.stage }}</span>
+          <van-progress :percentage="finalProgress.pct" :pivot-text="`${finalProgress.pct}%`" stroke-width="6" />
         </div>
 
         <div class="live-panels">
@@ -417,5 +481,9 @@ html, body, #app { height: 100%; margin: 0; }
 .replay-bar { display: flex; align-items: center; gap: 8px; padding: 4px 2px 8px; }
 .replay-title { flex: 1; font-size: 13px; color: #646566; word-break: break-all; }
 .replay-audio { width: 100%; margin-bottom: 8px; }
+
+/* 会末版重跑进度（会中视图轻量条） */
+.final-progress { padding: 4px 2px 8px; }
+.fp-text { display: block; font-size: 12px; color: #646566; margin-bottom: 4px; }
 
 </style>

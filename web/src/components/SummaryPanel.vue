@@ -5,9 +5,17 @@ interface SummaryItem {
   seq: number
   title: string
   points: string[]
-  actionItems: { who: string; what: string; due?: string; status?: string }[]
+  // 2026-09-28 起波次 LLM 输出结构化待办 {task,assignee,due,quote}；旧数据是 {who,what,due,status}
+  actionItems: { who?: string; what?: string; task?: string; assignee?: string; due?: string; status?: string; quote?: string }[]
   attributes: { key: string; value: string }[]
   final: boolean
+}
+
+function actionText(a: SummaryItem['actionItems'][number]): string {
+  const who = a.who || a.assignee || ''
+  const what = a.what || a.task || ''
+  const due = a.due ? `（${a.due}）` : ''
+  return `${who ? `${who}：` : ''}${what}${due}`
 }
 
 defineProps<{ summaries: SummaryItem[]; meetingId: string }>()
@@ -52,7 +60,7 @@ async function copyReport(meetingId: string) {
         </div>
         <div v-if="s.actionItems.length" class="tags">
           <van-tag v-for="(a, i) in s.actionItems" :key="i" plain type="warning" class="tag">
-            {{ a.who }}：{{ a.what }}{{ a.due ? `（${a.due}）` : '' }}
+            {{ actionText(a) }}
           </van-tag>
         </div>
       </div>
