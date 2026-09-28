@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import io
 import json
 import logging
@@ -84,6 +85,37 @@ async def meeting_chunk(pcm: bytes, hotwords: str = "", timeout_sec: float | Non
             return j.get("segs", []), j.get("anon", [])
     except Exception:
         logger.exception("meeting_chunk failed")
+        return None
+
+
+async def meeting_chunk_3ds(pcm: bytes, hotwords: str = "", timeout_sec: float | None = None) -> tuple | None:
+    """会中批次 3D-Speaker 路径（P1 换芯，2026-09-28）：降噪 → 本地3D聚类 → GPU 认人+转写。
+
+    与 meeting_chunk 同契约：返回 (segs, [])，segs=[{start,end,speaker,text}]（秒），
+    失败 None。无声纹命中的匿名簇统一映射"未识别"（用户拍板：不再保留"说话人N"
+    兜底号做区分）。旧 meeting_chunk（自研 VAD 批次路径）保留供回滚，不再被会中调用。
+    """
+    try:
+        from app.core.preprocess import denoise_pcm
+        import app.core.diarize3ds as diarize3ds
+
+        pcm = denoise_pcm(pcm)
+        segments = await asyncio.to_thread(diarize3ds.diarize, pcm)
+        if not segments:
+            return [], []
+        segs = await identify_segments(
+            pcm, segments, hotwords,
+            timeout_sec=timeout_sec or settings.pipeline_chunk_timeout_sec,
+        )
+        if segs is None:
+            return None
+        import re
+        for s in segs:
+            if re.fullmatch(r"说话人\d+", (s.get("speaker") or "")):
+                s["speaker"] = "未识别"
+        return segs, []
+    except Exception:
+        logger.exception("meeting_chunk_3ds failed")
         return None
 
 

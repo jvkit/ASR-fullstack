@@ -1,8 +1,8 @@
 """会议会话：一次会议的完整生命周期编排（非实时批次架构）。
 
 数据流：
-    前端音频 → 累积缓冲 ──每 8~15s 一批──▶ GPU /meeting_chunk
-        （VAD 切句 + SeACo Paraformer 转写 + ERes2NetV2 认人）
+    前端音频 → 累积缓冲 ──每 30~45s 一批──▶ 本地 GTCRN 降噪 + 3D-Speaker 聚类
+        → GPU /identify_segments（簇级声纹认人 + 逐段 ASR + 标点 + ITN）
         → 带说话人的句子：落库 + 广播 → 批次增强（LLM 纠错 + 滚动纪要）
     会末：同一端点全场重跑 → 权威终版（utterances_re）
 
@@ -22,7 +22,7 @@ from fastapi import WebSocket
 
 from app.config import settings, load_hotwords
 from app.core.enhancer import BatchEnhancer
-from app.core.gpu_pipeline import meeting_chunk, vad_ends
+from app.core.gpu_pipeline import meeting_chunk_3ds, vad_ends
 from app.core.segment import UtteranceBuffer
 from app.db.database import SessionLocal
 from app.db.models import Meeting, Summary, Utterance
@@ -37,8 +37,12 @@ UNKNOWN_SPEAKER = "未识别"
 
 
 def display_speaker(spk: str) -> str:
-    """GPU 侧标签 → 前端显示标签：注册人名与"说话人N"兜底号原样保留，其余 → 未识别。"""
+    """GPU 侧标签 → 前端显示标签：注册人名原样保留；匿名兜底号（说话人N/陌生人N）
+    与空/待定统一降级"未识别"（2026-09-28 用户拍板：不区分未注册个体）。"""
     if not spk or spk in ("待定",) or spk.startswith("陌生人"):
+        return UNKNOWN_SPEAKER
+    import re
+    if re.fullmatch(r"说话人\d+", spk):
         return UNKNOWN_SPEAKER
     return spk
 
@@ -229,7 +233,8 @@ class MeetingSession:
         self._audio.extend(pcm)
 
     async def _batch_loop(self) -> None:
-        """定时成批：攒够 pipeline_batch_min_sec 后按 VAD 句尾切点送 /meeting_chunk。"""
+        """定时成批：攒够 pipeline_batch_min_sec 后按 VAD 句尾切点送 3D 换芯路径
+        （gpu_pipeline.meeting_chunk_3ds）。"""
         try:
             while not self._stopped:
                 await asyncio.sleep(settings.pipeline_tick_sec)
@@ -271,8 +276,9 @@ class MeetingSession:
 
         chunk = pcm[:int(cut_ms * 32)]
         # shield：stop 取消批次循环时，在飞的 GPU 请求仍跑完（否则 flush 会重复送）
-        # 方案 B：不再传匿名簇状态（GPU 侧走默认空状态，只做声纹库认人）
-        res = await asyncio.shield(meeting_chunk(chunk, self._hotwords))
+        # P1 换芯（2026-09-28）：会中走 3D-Speaker（降噪→本地3D聚类→GPU identify_segments），
+        # 无声纹统一"未识别"；meeting_chunk（自研 VAD）保留供回滚不再被调用。
+        res = await asyncio.shield(meeting_chunk_3ds(chunk, self._hotwords))
         if res is None:
             self._chunk_failures += 1
             if self._chunk_failures >= 3 and not force:
