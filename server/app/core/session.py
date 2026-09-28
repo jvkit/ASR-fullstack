@@ -36,14 +36,19 @@ logger = logging.getLogger(__name__)
 UNKNOWN_SPEAKER = "未识别"
 
 
-def display_speaker(spk: str) -> str:
-    """GPU 侧标签 → 前端显示标签：注册人名原样保留；匿名兜底号（说话人N/陌生人N）
-    与空/待定统一降级"未识别"（2026-09-28 用户拍板：不区分未注册个体）。"""
+def display_speaker(spk: str, *, keep_anon: bool = False) -> str:
+    """GPU 侧标签 → 前端显示标签。
+
+    keep_anon=False（会中默认，2026-09-28 用户拍板）：匿名兜底号（说话人N/陌生人N）
+    与空/待定统一降级"未识别"，不区分未注册个体。
+    keep_anon=True（会末版）：说话人N 原样保留——会末版的卖点就是区分人，
+    未注册个体间保持可区分（101段 vs 27段 = 两个不同的人）。
+    """
     if not spk or spk in ("待定",) or spk.startswith("陌生人"):
         return UNKNOWN_SPEAKER
     import re
     if re.fullmatch(r"说话人\d+", spk):
-        return UNKNOWN_SPEAKER
+        return spk if keep_anon else UNKNOWN_SPEAKER
     return spk
 
 

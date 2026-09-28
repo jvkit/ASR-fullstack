@@ -83,7 +83,7 @@ async def reannotate(
                 db.add(ReAnnotateUtterance(
                     meeting_id=meeting_id,
                     seq=i,
-                    speaker=display_speaker(s.get("speaker") or ""),
+                    speaker=display_speaker(s.get("speaker") or "", keep_anon=True),
                     text=(s.get("text") or "").strip(),
                     start_ms=int(float(s["start"]) * 1000),
                     end_ms=int(float(s["end"]) * 1000),
