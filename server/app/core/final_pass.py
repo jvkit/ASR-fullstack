@@ -57,6 +57,11 @@ async def run_final_pass(session: MeetingSession) -> bool:
         return False
     await broadcast({"type": "reannotated", "meeting_id": meeting_id})
 
+    # 2.5) 视觉落库收割：timer 转后台的 OCR 任务先跑完，再把缓冲剩余帧落库——
+    # 否则下面波次 _load_visual_notes 按时间窗查不到（2026-09-29 竞态修复）
+    if settings.visual_enabled and session.visual_app:
+        await session.wait_visual_drained()
+
     # 2) 读 utterances_re（会末版唯一原文源；说话人已 keep_anon 区分个体）
     async with SessionLocal() as db:
         rows = (await db.execute(

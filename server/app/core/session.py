@@ -86,6 +86,7 @@ class MeetingSession:
         # 视觉提示词应用层（None=无视觉；"online"=屏幕共享，"offline"=摄像头）。
         # 线上=屏幕模板；线下=摄像头模板（2026-09-29 起线下摄像头帧进 OCR，白板/PPT 投屏入纪要）
         self.visual_app: str | None = "online" if online else "offline"
+        self._visual_persist_task: asyncio.Task | None = None  # 后台 OCR 落库（wait_visual_drained 收割）
 
         self.enhancer = BatchEnhancer(self)
 
@@ -162,23 +163,8 @@ class MeetingSession:
                 await self._visual_timer_task
             except asyncio.CancelledError:
                 pass
-
-        # final 模式会末冲刷：120s 打拍，尾巴不足一拍的帧在这里补 OCR 落库
-        if self.version_mode == "final" and settings.visual_enabled and self.visual_app:
-            try:
-                from app.core.enhancer import persist_visual_note
-                frames = await self.visual.take_group()
-                if frames:
-                    from app.core.visual_ocr import visual_ocr
-                    text = await visual_ocr(frames, app=self.visual_app)
-                    if text:
-                        await persist_visual_note(self.meeting_id,
-                                                  frames[0][0], frames[-1][0], text)
-                        logger.info("meeting %s visual flush %d-%dms (%d 帧, %d 字)",
-                                    self.meeting_id, frames[0][0], frames[-1][0],
-                                    len(frames), len(text))
-            except Exception:
-                logger.exception("meeting %s visual flush failed（不阻塞）", self.meeting_id)
+        # 注意：剩余视觉帧不在此同步冲刷（OCR 分钟级，卡 ended）。
+        # 帧由 _wait_visual_drained 在会末 final_pass 波次前统一落库（后台，用户无感）。
 
         self._save_recording()
 
@@ -299,13 +285,11 @@ class MeetingSession:
         """final-only 模式的视觉 OCR 节拍器（2026-09-28）。
 
         final 模式没有会中波次，enhancer 不驱动 take_group，视觉 OCR 缺节拍——这里
-        每 visual_note_interval_sec（默认 120s）取走缓冲帧送 OCR 并落 VisualNote，
+        每 visual_note_interval_sec（默认 120s）取走缓冲帧转后台任务 OCR 落库
+        （cancel timer 不打断落库；final_pass 前 wait_visual_drained 统一收割），
         作为会末版按时间范围关联复用的唯一 OCR 来源。失败仅记日志（与实时版一致，
         不阻塞任何主流程）；暂停期间不打拍。
         """
-        from app.core.enhancer import persist_visual_note
-        from app.core.visual_ocr import visual_ocr
-
         try:
             while not self._stopped:
                 await asyncio.sleep(settings.visual_note_interval_sec)
@@ -315,18 +299,44 @@ class MeetingSession:
                     frames = await self.visual.take_group()
                     if not frames:
                         continue
-                    text = await visual_ocr(frames, app=self.visual_app)
-                    if text:
-                        await persist_visual_note(self.meeting_id,
-                                                  frames[0][0], frames[-1][0], text)
-                        logger.info("meeting %s visual note %d-%dms (%d 帧, %d 字)",
-                                    self.meeting_id, frames[0][0], frames[-1][0],
-                                    len(frames), len(text))
+                    # 落库转后台任务：stop 立即返回不等 OCR；final_pass 前会 drain 完
+                    self._visual_persist_task = asyncio.create_task(self._ocr_and_persist(frames))
                 except Exception:
                     logger.exception("meeting %s visual timer tick failed（不阻塞）",
                                      self.meeting_id)
         except asyncio.CancelledError:
             raise
+
+    async def _ocr_and_persist(self, frames: list) -> None:
+        """一组帧 → OCR → 落 VisualNote。独立后台任务，cancel timer 不影响它。"""
+        try:
+            from app.core.enhancer import persist_visual_note
+            from app.core.visual_ocr import visual_ocr
+            text = await visual_ocr(frames, app=self.visual_app)
+            if text:
+                await persist_visual_note(self.meeting_id,
+                                          frames[0][0], frames[-1][0], text)
+                logger.info("meeting %s visual note %d-%dms (%d 帧, %d 字)",
+                            self.meeting_id, frames[0][0], frames[-1][0],
+                            len(frames), len(text))
+        except Exception:
+            logger.exception("meeting %s visual persist failed（不阻塞）", self.meeting_id)
+
+    async def wait_visual_drained(self) -> None:
+        """会末波次前调用：等后台 OCR 落库完成 + 把缓冲里剩余帧也落库。
+
+        final_pass 的 _load_visual_notes 按时间窗查 VisualNote，必须先于查询完成，
+        否则 timer 取走但没来得及落库的帧对波次不可见（2026-09-29 竞态修复）。
+        """
+        t = self._visual_persist_task
+        if t is not None:
+            try:
+                await t
+            except Exception:
+                pass
+        frames = await self.visual.take_group()
+        if frames:
+            await self._ocr_and_persist(frames)
 
     # ---------- 音频上行与批次调度 ----------
 
