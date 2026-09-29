@@ -81,6 +81,44 @@ let pendingDisplayStream: MediaStream | null = null
 let cameraStream: MediaStream | null = null // 线下摄像头（独立流，需自行停轨）
 const previewStream = ref<MediaStream | null>(null)
 
+// ---------- 预览调试面板：流→轨道→video 元素→播放状态，每秒采样 ----------
+const previewDebug = ref('')
+let previewDebugTimer: ReturnType<typeof setInterval> | null = null
+
+function startPreviewDebug() {
+  stopPreviewDebug()
+  previewDebugTimer = setInterval(() => {
+    const s = previewStream.value
+    if (!s) {
+      previewDebug.value = 'stream=null'
+      return
+    }
+    const vt = s.getVideoTracks()[0]
+    const parts = [
+      `stream✓ tracks=${s.getTracks().length}`,
+      vt
+        ? `track=${vt.readyState},en=${vt.enabled},mu=${vt.muted}`
+        : 'track=无video轨',
+    ]
+    const el = document.querySelector<HTMLVideoElement>('.vp-video')
+    if (!el) {
+      parts.push('el=未渲染')
+    } else {
+      parts.push(
+        `el.rs=${el.readyState} ${el.videoWidth}x${el.videoHeight} paused=${el.paused} t=${el.currentTime.toFixed(1)} muted=${el.muted} err=${el.error?.code ?? '-'} so=${el.srcObject ? '✓' : 'null'}`,
+      )
+      if (el.paused && el.srcObject) el.play().catch(() => {}) // autoplay 被拒自动救活
+    }
+    previewDebug.value = parts.join(' | ')
+  }, 1000)
+}
+
+function stopPreviewDebug() {
+  if (previewDebugTimer) clearInterval(previewDebugTimer)
+  previewDebugTimer = null
+  previewDebug.value = ''
+}
+
 // 说话人配色（按出现顺序循环）
 const speakerColors = ['#e6646c', '#3aa675', '#3b7fe0', '#a06ee1', '#d98e32', '#2ba0b8', '#c2568c', '#6a8f3c']
 const speakerColorMap = new Map<string, string>()
@@ -162,6 +200,7 @@ function handleMessage(msg: ServerMessage) {
       cameraStream?.getTracks().forEach((t) => t.stop())
       cameraStream = null
       previewStream.value = null
+      stopPreviewDebug()
       if (replaying.value) {
         replayFinished.value = true
       }
@@ -247,6 +286,7 @@ async function onStart(payload: StartConfig) {
     hotwords: payload.hotwords,
   })
   recording.value = true
+  startPreviewDebug()
 }
 
 async function onPause() {
@@ -275,6 +315,7 @@ async function onStop() {
   cameraStream?.getTracks().forEach((t) => t.stop())
   cameraStream = null
   previewStream.value = null
+  stopPreviewDebug()
   // 立即切回「开始记录」，不等服务端 ended（服务端还要 flush + 最终总结，可能十几秒）
   recording.value = false
   paused.value = false
@@ -439,7 +480,8 @@ onMounted(() => {
             </van-tag>
             <span class="vp-tip">画面仅本地预览调试，不上行</span>
           </div>
-          <video :src-object.prop="previewStream" class="vp-video" autoplay muted playsinline />
+          <video :srcObject.prop="previewStream" class="vp-video" autoplay muted playsinline />
+          <div class="vp-debug">{{ previewDebug }}</div>
         </div>
 
         <div v-if="liveAttrs.length" class="live-attrs">
@@ -526,5 +568,6 @@ html, body, #app { height: 100%; margin: 0; }
 .vp-head { display: flex; align-items: center; gap: 8px; padding: 6px 8px; background: #fafafa; }
 .vp-tip { font-size: 12px; color: #969799; }
 .vp-video { display: block; width: 100%; max-height: 260px; object-fit: contain; }
+.vp-debug { padding: 4px 8px; font-size: 11px; color: #969799; word-break: break-all; background: #fafafa; font-variant-numeric: tabular-nums; }
 
 </style>
