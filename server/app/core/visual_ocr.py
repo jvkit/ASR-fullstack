@@ -39,6 +39,25 @@ PROMPTS = {
 # 单组帧数上限：实测 32 帧读图 2min+，16 帧内延迟可控（超出按均匀间隔抽样）
 MAX_FRAMES_PER_GROUP = 16
 
+# 视觉请求用裸 OpenAI 客户端：langfuse 的 openai wrapper 提取多模态 prompt
+# 时抛异常（image_url 数组消息未适配），请求到不了网关。裸客户端绕开拦截，
+# 视觉调用不进 Langfuse trace（文字链路 trace 不受影响）。
+_raw_client = None
+
+
+def _get_raw_client():
+    global _raw_client
+    if _raw_client is None:
+        from openai import OpenAI
+
+        _raw_client = OpenAI(
+            base_url=settings.llm_base_url,
+            api_key=settings.llm_api_key,
+            timeout=settings.visual_llm_timeout_sec,
+            max_retries=0,
+        )
+    return _raw_client
+
 
 def _mmss(t_ms: int) -> str:
     s = max(0, int(t_ms)) // 1000
@@ -66,19 +85,17 @@ async def visual_ocr(frames: list[tuple[int, bytes]], app: str = "") -> str:
     frames = _sample_frames(frames)
     if app not in PROMPTS:
         app = settings.visual_prompt_app if settings.visual_prompt_app in PROMPTS else "online"
-    parts = [PROMPTS[app]]
+    parts = [{"type": "text", "text": PROMPTS[app]}]
     for t_ms, jpeg in frames:
         b64 = base64.b64encode(jpeg).decode()
-        parts.append(f"[{_mmss(t_ms)}]")
+        parts.append({"type": "text", "text": f"[{_mmss(t_ms)}]"})
         parts.append({"type": "image_url",
                       "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
-
-    from app.llm import client as llm_client  # 复用同一 OpenAI 客户端（Langfuse 埋点同款）
 
     try:
         resp = await asyncio.wait_for(
             asyncio.to_thread(
-                llm_client.client.chat.completions.create,
+                _get_raw_client().chat.completions.create,
                 model=settings.visual_llm_model,
                 messages=[{"role": "user", "content": parts}],
                 temperature=0.2,
