@@ -153,7 +153,7 @@ class Settings(BaseSettings):
     # 服务
     server_host: str = "0.0.0.0"
     server_port: int = 8000
-    database_url: str = "sqlite+aiosqlite:///./meeting.db"
+    database_url: str = "mysql+asyncmy://meeting:meeting_asr@127.0.0.1:3306/meeting_asr?charset=utf8mb4"
     recordings_dir: str = "./recordings"    # 会议录音 wav 存放目录
 
     # 会末收尾（总结/标题/标签/属性在 _finalize 一次完成）

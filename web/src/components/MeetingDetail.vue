@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import DebugPanel from './DebugPanel.vue'
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
 interface Attr { key: string; value: string }
@@ -37,7 +38,7 @@ const actionItems = ref<ActionItem[]>([]) // 权威待办清单（会末版聚�
 const loading = ref(true)
 
 // 双版本 tab（2026-09-28）：live/final 只显示对应一个，both 两个都显示
-const activeTab = ref<'live' | 'final'>('live')
+const activeTab = ref<'live' | 'final' | 'debug'>('live')
 const showLive = computed(() => versionMode.value !== 'final')
 const showFinal = computed(() => versionMode.value !== 'live')
 
@@ -219,6 +220,9 @@ async function downloadMarkdown() {
     </van-cell-group>
 
     <van-tabs v-model:active="activeTab" class="version-tabs">
+      <van-tab title="调试" name="debug">
+        <DebugPanel :meeting-id="props.meetingId" />
+      </van-tab>
       <!-- ============ 实时版本（会中批次，草稿态） ============ -->
       <van-tab v-if="showLive" title="实时版本" name="live">
         <div class="cols">

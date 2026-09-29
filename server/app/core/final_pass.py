@@ -27,7 +27,9 @@ from typing import TYPE_CHECKING
 from sqlalchemy import select
 
 from app.config import settings
+from app.db import event_stages
 from app.db.database import SessionLocal
+from app.db.events import log_event
 from app.db.models import Meeting, ReAnnotateUtterance, Summary, VisualNote
 from app.llm import client as llm_client
 
@@ -50,11 +52,14 @@ async def run_final_pass(session: MeetingSession) -> bool:
     meeting_id = session.meeting_id
     broadcast = session.broadcast
 
+    await log_event(meeting_id, event_stages.REANNOTATE_START)
     # 1) 全场重跑 → utterances_re（复用现有 reannotate；失败=会末版整体失败，不回退）
     await broadcast({"type": "final_progress", "stage": "reannotate", "pct": 5})
     if not await reannotate(meeting_id, bytes(session._audio)):
+        await log_event(meeting_id, event_stages.REANNOTATE_END, ok=False)
         logger.error("final pass %s: reannotate failed, 会末版终止", meeting_id)
         return False
+    await log_event(meeting_id, event_stages.REANNOTATE_END, ok=True)
     await broadcast({"type": "reannotated", "meeting_id": meeting_id})
 
     # 2.5) 视觉落库收割：timer 转后台的 OCR 任务先跑完，再把缓冲剩余帧落库——
@@ -106,7 +111,8 @@ async def run_final_pass(session: MeetingSession) -> bool:
         prev_summary = segments[-1]["content"] if segments else ""
 
         result = await _llm_enhance(ctx_summaries, prev_summary, prev_lines, cur_raw,
-                                    ocr_text=ocr_text)
+                                    ocr_text=ocr_text, meeting_id=meeting_id,
+                                    scope="final", seq=len(segments) + 1)
         pct = 30 + int(55 * (wi + 1) / len(wave_keys))
         if result is None:
             # 失败不兜底（同实时版原则）：记日志跳过，本波无段纪要、文字留草稿
@@ -159,7 +165,7 @@ async def run_final_pass(session: MeetingSession) -> bool:
                     await db.execute(
                         ReAnnotateUtterance.__table__.update()
                         .where(ReAnnotateUtterance.id == row_id)
-                        .values(speaker=spk, text=txt)
+                        .values(speaker=spk, text=txt, corrected_text=txt)
                     )
                 await db.commit()
 
@@ -193,7 +199,7 @@ async def run_final_pass(session: MeetingSession) -> bool:
                 "action_items": actions,
             }
             segments.append(seg)
-            await _persist_segment(meeting_id, seg)
+            await _persist_segment(meeting_id, seg, ocr_text=ocr_text)
             await _broadcast_segment(session, seg, final=False)
 
         prev_lines = corrected_cur
@@ -300,13 +306,14 @@ async def _load_visual_notes(meeting_id: str, start_ms: int, end_ms: int) -> str
     return "\n\n".join(r.text for r in rows if r.text)
 
 
-async def _persist_segment(meeting_id: str, seg: dict) -> None:
+async def _persist_segment(meeting_id: str, seg: dict, ocr_text: str = "") -> None:
     async with SessionLocal() as db:
         db.add(Summary(
             meeting_id=meeting_id,
             seq=seg["seq"],
             scope="final",
             window_text=seg["window_text"],
+            ocr_text=ocr_text,
             content=seg["content"],
             action_items=json.dumps(seg.get("action_items") or [], ensure_ascii=False),
             attributes="[]",

@@ -27,11 +27,14 @@ from datetime import datetime
 from fastapi import WebSocket
 
 from app.config import settings, load_hotwords
+from app.core.audio_storage import save_raw_recording
 from app.core.enhancer import BatchEnhancer
 from app.core.gpu_pipeline import meeting_chunk_3ds, vad_ends
 from app.core.segment import UtteranceBuffer
+from app.db import event_stages
 from app.db.database import SessionLocal
-from app.db.models import Meeting, Summary, Utterance
+from app.db.events import log_event
+from app.db.models import DiarSegment, Meeting, Summary, Utterance
 from app.llm import client as llm_client
 
 logger = logging.getLogger(__name__)
@@ -125,6 +128,9 @@ class MeetingSession:
             db.add(Meeting(id=self.meeting_id, title=self.title, recorder=self.recorder,
                            version_mode=self.version_mode, source_mode=self.source_mode))
             await db.commit()
+        await log_event(self.meeting_id, event_stages.MEETING_START,
+                        version_mode=self.version_mode,
+                        source_mode=self.source_mode)
         # 双版本架构（2026-09-28）：live/both 走会中批次循环；final-only 跳过会中处理
         # （不送 GPU、不出 transcript、不跑 enhancer），音频只累积存档 + 视觉改由
         # 120s 定时任务驱动 OCR（final 模式的会末版按时间范围复用这些 VisualNote）
@@ -174,6 +180,7 @@ class MeetingSession:
                 meeting.status = "ended"
                 meeting.ended_at = datetime.now()
                 await db.commit()
+        await log_event(self.meeting_id, event_stages.MEETING_END)
         await self.broadcast({"type": "ended", "meeting_id": self.meeting_id})
         logger.info("meeting %s ended (finalization continues in background)", self.meeting_id)
 
@@ -388,10 +395,19 @@ class MeetingSession:
             cut_ms = min(cut_ms, pending_ms)
 
         chunk = pcm[:int(cut_ms * 32)]
+        await log_event(self.meeting_id, event_stages.DENOISE_START)
+        from app.core.preprocess import denoise_pcm
+        denoised_chunk = denoise_pcm(chunk)
+        await log_event(self.meeting_id, event_stages.DENOISE_END,
+                        chunk_ms=int(cut_ms))
+        await log_event(self.meeting_id, event_stages.DIAR_START,
+                        chunk_ms=int(cut_ms))
         # shield：stop 取消批次循环时，在飞的 GPU 请求仍跑完（否则 flush 会重复送）
         # P1 换芯（2026-09-28）：会中走 3D-Speaker（降噪→本地3D聚类→GPU identify_segments），
         # 无声纹统一"未识别"；meeting_chunk（自研 VAD）保留供回滚不再被调用。
-        res = await asyncio.shield(meeting_chunk_3ds(chunk, self._hotwords))
+        res = await asyncio.shield(meeting_chunk_3ds(denoised_chunk, self._hotwords))
+        await log_event(self.meeting_id, event_stages.DIAR_END,
+                        segs=len(res[0]) if res else 0)
         if res is None:
             self._chunk_failures += 1
             if self._chunk_failures >= 3 and not force:
@@ -410,22 +426,35 @@ class MeetingSession:
             return
 
         seqs: list[int] = []
-        for s in segs:
+        for i, s in enumerate(segs):
             text = (s.get("text") or "").strip()
             if not text:
                 continue  # 空段不展示（碎段已在 GPU 侧参与打标/修剪）
             start_ms = int(base_ms + float(s["start"]) * 1000)
             end_ms = int(base_ms + float(s["end"]) * 1000)
-            item = await self.buffer.add(display_speaker(s.get("speaker") or ""), text, start_ms, end_ms)
+            spk = display_speaker(s.get("speaker") or "")
+            item = await self.buffer.add(spk, text, start_ms, end_ms)
             async with SessionLocal() as db:
                 db.add(Utterance(
                     meeting_id=self.meeting_id,
                     seq=item.seq,
                     speaker=item.speaker,
+                    raw_text=text,
                     text=item.text,
                     start_ms=item.start_ms,
                     end_ms=item.end_ms,
                     char_timestamps="[]",
+                    source="live",
+                    diar_score=float(s.get("score")) if s.get("score") is not None else None,
+                ))
+                db.add(DiarSegment(
+                    meeting_id=self.meeting_id,
+                    start_ms=start_ms,
+                    end_ms=end_ms,
+                    cluster_label=str(s.get("cluster_id") or ""),
+                    matched_speaker=spk,
+                    score=float(s.get("score")) if s.get("score") is not None else None,
+                    source="live",
                 ))
                 await db.commit()
             await self.broadcast({
@@ -500,10 +529,23 @@ class MeetingSession:
                 wf.setsampwidth(2)
                 wf.setframerate(16000)
                 wf.writeframes(bytes(self._audio))
+            # 调试产物：原始整轨也落 data/debug/{meeting_id}/raw.wav
+            raw_rel = save_raw_recording(self.meeting_id, bytes(self._audio))
+            asyncio.create_task(self._save_recording_path(raw_rel))
             logger.info("meeting %s recording saved: %s (%.1f min)",
                         self.meeting_id, out_path, len(self._audio) / 32000 / 60)
         except Exception:
             logger.exception("meeting %s save recording failed", self.meeting_id)
+
+    async def _save_recording_path(self, raw_rel: str) -> None:
+        try:
+            async with SessionLocal() as db:
+                meeting = await db.get(Meeting, self.meeting_id)
+                if meeting:
+                    meeting.audio_raw_path = raw_rel
+                    await db.commit()
+        except Exception:
+            logger.exception("save recording path failed")
 
     # ---------- 广播 ----------
 

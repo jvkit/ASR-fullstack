@@ -25,8 +25,11 @@ from pathlib import Path
 from sqlalchemy import delete
 
 from app.config import settings, load_hotwords
+from app.core.audio_storage import save_denoised_recording, save_segment_audio
+from app.db import event_stages
 from app.db.database import SessionLocal
-from app.db.models import Meeting, ReAnnotateUtterance
+from app.db.events import log_event
+from app.db.models import DiarSegment, Meeting, ReAnnotateUtterance
 
 logger = logging.getLogger(__name__)
 
@@ -53,20 +56,34 @@ async def reannotate(
         from app.core.gpu_pipeline import identify_segments
         from app.core.preprocess import denoise_pcm
 
+        await log_event(meeting_id, event_stages.DENOISE_START)
         # 1) 本地 GTCRN 降噪（推理副本；原始存档不受影响）
         pcm = denoise_pcm(pcm)
+        await log_event(meeting_id, event_stages.DENOISE_END,
+                        duration_ms=len(pcm) // 32)
+        # 降噪后整轨落盘（调试用）
+        denoised_path = save_denoised_recording(meeting_id, pcm)
+        async with SessionLocal() as db:
+            meeting = await db.get(Meeting, meeting_id)
+            if meeting:
+                meeting.audio_denoised_path = denoised_path
+                await db.commit()
 
+        await log_event(meeting_id, event_stages.DIAR_START)
         # 2) 本地 3D-Speaker 分离（CPU，长会议分钟级）
         segments = diarize(pcm, sr=16000)
+        await log_event(meeting_id, event_stages.DIAR_END, segments=len(segments))
         logger.info("reannotate %s: 3ds diarize done, %d segs", meeting_id, len(segments))
         if not segments:
             logger.error("reannotate %s: 3ds produced no segments", meeting_id)
             return False
 
         # 3) GPU 认人 + 转写（一次 HTTP 批量：整段 wav + 全部边界）
+        await log_event(meeting_id, event_stages.ASR_START, segments=len(segments))
         hotwords = load_hotwords().replace(",", " ")
         segs = await identify_segments(pcm, segments, hotwords, timeout_sec=timeout_sec,
                                        name_threshold=name_threshold)
+        await log_event(meeting_id, event_stages.ASR_END, segments=len(segs) if segs else 0)
         if segs is None:
             logger.error("reannotate %s: identify_segments failed, final version aborted "
                          "(no fallback to legacy pipeline)", meeting_id)
@@ -79,14 +96,46 @@ async def reannotate(
             await db.execute(
                 delete(ReAnnotateUtterance).where(ReAnnotateUtterance.meeting_id == meeting_id)
             )
+            await db.execute(
+                delete(DiarSegment).where(DiarSegment.meeting_id == meeting_id)
+                .where(DiarSegment.source == "final")
+            )
+            pcm_samples = pcm  # int16 bytes
             for i, s in enumerate(segs):
+                start_ms = int(float(s["start"]) * 1000)
+                end_ms = int(float(s["end"]) * 1000)
+                # 切出该段音频落盘
+                seg_pcm = b""
+                try:
+                    s0 = int(float(s["start"]) * 16000) * 2
+                    s1 = int(float(s["end"]) * 16000) * 2
+                    seg_pcm = pcm_samples[s0:s1]
+                    audio_path = save_segment_audio(meeting_id, "final", i, seg_pcm,
+                                                    start_ms, end_ms)
+                except Exception:
+                    logger.exception("save final segment audio failed")
+                    audio_path = None
+
                 db.add(ReAnnotateUtterance(
                     meeting_id=meeting_id,
                     seq=i,
                     speaker=display_speaker(s.get("speaker") or "", keep_anon=True),
                     text=(s.get("text") or "").strip(),
-                    start_ms=int(float(s["start"]) * 1000),
-                    end_ms=int(float(s["end"]) * 1000),
+                    raw_text=(s.get("text") or "").strip(),
+                    start_ms=start_ms,
+                    end_ms=end_ms,
+                    audio_path=audio_path,
+                    diar_score=float(s.get("score")) if s.get("score") is not None else None,
+                ))
+                db.add(DiarSegment(
+                    meeting_id=meeting_id,
+                    start_ms=start_ms,
+                    end_ms=end_ms,
+                    cluster_label=str(s.get("cluster_id") or ""),
+                    matched_speaker=display_speaker(s.get("speaker") or "", keep_anon=True),
+                    score=float(s.get("score")) if s.get("score") is not None else None,
+                    audio_path=audio_path,
+                    source="final",
                 ))
             meeting = await db.get(Meeting, meeting_id)
             if meeting:

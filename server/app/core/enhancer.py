@@ -25,6 +25,9 @@ import logging
 
 from app.config import settings
 from app.core.visual_ocr import visual_ocr
+from app.core.visual_storage import save_visual_frames
+from app.db import event_stages
+from app.db.events import log_event
 
 logger = logging.getLogger(__name__)
 
@@ -34,21 +37,36 @@ def _mmss(ms: int) -> str:
     return f"{s // 60:02d}:{s % 60:02d}"
 
 
-async def persist_visual_note(meeting_id: str, start_ms: int, end_ms: int, text: str) -> None:
-    """视觉 OCR 文本落 VisualNote 存档（实时版波次与 final-only 定时任务共用入口）。
+async def persist_visual_note(meeting_id: str, start_ms: int, end_ms: int,
+                              text: str, frames: list[tuple[int, bytes]] | None = None) -> int | None:
+    """视觉 OCR 文本 + 帧图落 VisualNote 存档。返回新记录 id，空文本返回 None。
 
     会末版按 [start_ms, end_ms] 时间范围关联复用，不重跑 OCR（2026-09-28 双版本
-    架构：两版只复用视觉结果）。空文本不落库。
+    架构：两版只复用视觉结果）。
     """
     if not text.strip():
-        return
+        return None
+    import json
+
     from app.db.database import SessionLocal
     from app.db.models import VisualNote
 
+    frame_paths: list[str] = []
+    if frames:
+        frame_paths = save_visual_frames(meeting_id, 0, frames)
+
     async with SessionLocal() as db:
-        db.add(VisualNote(meeting_id=meeting_id, start_ms=int(start_ms),
-                          end_ms=int(end_ms), text=text))
+        note = VisualNote(
+            meeting_id=meeting_id,
+            start_ms=int(start_ms),
+            end_ms=int(end_ms),
+            text=text,
+            frame_paths=json.dumps(frame_paths, ensure_ascii=False),
+        )
+        db.add(note)
         await db.commit()
+        await db.refresh(note)
+        return note.id
 
 
 class BatchEnhancer:
@@ -120,12 +138,23 @@ class BatchEnhancer:
             try:
                 frames = await self._session.visual.take_group()
                 if frames:
+                    await log_event(self._session.meeting_id, event_stages.OCR_START,
+                                    frames=len(frames), start_ms=frames[0][0],
+                                    end_ms=frames[-1][0])
                     ocr_text = await visual_ocr(frames, app=self._session.visual_app)
                     if ocr_text:
                         # OCR 结果除进本波 prompt 外落 VisualNote 存档：会末版按时间范围
                         # 关联复用，不重跑 OCR（2026-09-28 双版本架构）
-                        await persist_visual_note(self._session.meeting_id,
-                                                  frames[0][0], frames[-1][0], ocr_text)
+                        note_id = await persist_visual_note(self._session.meeting_id,
+                                                            frames[0][0], frames[-1][0],
+                                                            ocr_text, frames=frames)
+                        await log_event(self._session.meeting_id, event_stages.OCR_END,
+                                        note_id=note_id, chars=len(ocr_text),
+                                        start_ms=frames[0][0], end_ms=frames[-1][0])
+                    else:
+                        await log_event(self._session.meeting_id, event_stages.OCR_END,
+                                        empty=True, start_ms=frames[0][0],
+                                        end_ms=frames[-1][0])
             except Exception:
                 logger.exception("visual wave failed for %s（不阻塞纪要）",
                                  self._session.meeting_id)
@@ -137,7 +166,8 @@ class BatchEnhancer:
         prev_summary = self._segments[-1]["content"] if self._segments else ""
 
         result = await _llm_enhance(ctx_summaries, prev_summary, self._prev_lines, cur_raw,
-                                    ocr_text=ocr_text)
+                                    ocr_text=ocr_text, meeting_id=self._session.meeting_id,
+                                    scope="live", seq=self.summary_seq + 1)
         if result is None:
             # 失败不兜底：记日志跳过。本波原文仍登记为「上一波」，
             # 下一波的 2 波原文窗口会带上它 → 纠错自动延后一波补做。
@@ -285,6 +315,7 @@ class BatchEnhancer:
                     scope="live",   # 实时波段纪要（会末版段纪要 scope='final'，见 final_pass）
                     window_text=seg["window_text"],
                     content=seg["content"],
+                    ocr_text=ocr_text or "",
                     action_items=json.dumps(seg.get("action_items") or [],
                                             ensure_ascii=False),
                     attributes="[]",
@@ -311,11 +342,13 @@ class BatchEnhancer:
 
         async with SessionLocal() as db:
             for seq, spk, txt in updates:
+                # 首次保存 corrected_text；text 保持最新展示态。
                 await db.execute(
                     Utterance.__table__.update()
                     .where(Utterance.meeting_id == self._session.meeting_id)
                     .where(Utterance.seq == seq)
-                    .values(speaker=spk, text=txt)
+                    .values(speaker=spk, text=txt,
+                            corrected_text=txt)
                 )
             await db.commit()
 
@@ -351,15 +384,24 @@ class BatchEnhancer:
 async def _llm_enhance(ctx_summaries: list[str], prev_summary: str,
                        prev_lines: list[tuple[str, str]],
                        cur_lines: list[tuple[str, str]],
-                       ocr_text: str = "") -> dict | None:
+                       ocr_text: str = "", *, meeting_id: str = "",
+                       scope: str = "live", seq: int = 0) -> dict | None:
     """一波一次合并 LLM 调用。失败/超时返回 None（调用方记日志跳过，不重试不累积）。
 
     Langfuse 经 openai wrapper 自动埋点。超时 roll_llm_timeout_sec 秒即放弃。
+    同时写 SummaryLlmLog：prompt、原始输出、耗时，供调试页看黑盒。
     """
+    import time
+
+    from app.db.database import SessionLocal
+    from app.db.models import SummaryLlmLog
     from app.llm import client as llm_client
 
     messages = llm_client.build_enhance_messages(ctx_summaries, prev_summary,
                                                  prev_lines, cur_lines, ocr_text=ocr_text)
+    t0 = time.monotonic()
+    await log_event(meeting_id, event_stages.LLM_WAVE_START,
+                    scope=scope, seq=seq, model=settings.llm_model)
     try:
         resp = await asyncio.wait_for(
             asyncio.to_thread(
@@ -372,6 +414,24 @@ async def _llm_enhance(ctx_summaries: list[str], prev_summary: str,
             timeout=settings.roll_llm_timeout_sec,
         )
         raw = resp.choices[0].message.content or "{}"
+        duration_ms = int((time.monotonic() - t0) * 1000)
+        if meeting_id:
+            try:
+                async with SessionLocal() as db:
+                    db.add(SummaryLlmLog(
+                        meeting_id=meeting_id,
+                        seq=seq,
+                        scope=scope,
+                        model=settings.llm_model,
+                        prompt_json=json.dumps(messages, ensure_ascii=False),
+                        raw_response=raw,
+                        duration_ms=duration_ms,
+                    ))
+                    await db.commit()
+            except Exception:
+                logger.exception("SummaryLlmLog persist failed")
+        await log_event(meeting_id, event_stages.LLM_WAVE_END,
+                        scope=scope, seq=seq, duration_ms=duration_ms)
         data = json.loads(raw)
         # lines / prev_corrections 都按显式行号 i 对齐（不依赖位置），
         # 模型漏行只影响漏掉的那几行，不再整波失败
@@ -388,6 +448,10 @@ async def _llm_enhance(ctx_summaries: list[str], prev_summary: str,
             # 结构化待办（2026-09-28）：task/assignee/due/quote 四字段，经 client 归一化
             "action_items": llm_client.parse_action_items(data.get("action_items")),
         }
-    except Exception:
+    except Exception as exc:
+        duration_ms = int((time.monotonic() - t0) * 1000)
+        await log_event(meeting_id, event_stages.LLM_WAVE_FAIL,
+                        scope=scope, seq=seq, duration_ms=duration_ms,
+                        error=str(exc)[:500])
         logger.exception("llm enhance failed")
         return None

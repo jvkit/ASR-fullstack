@@ -5,6 +5,7 @@ import logging
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.api.debug import router as debug_router
 from app.api.meetings import router as meetings_router
 from app.api.speakers import router as speakers_router
 from app.api.ws import router as ws_router
@@ -38,6 +39,7 @@ async def health() -> dict:
 app.include_router(ws_router)
 app.include_router(meetings_router)
 app.include_router(speakers_router)
+app.include_router(debug_router)
 
 
 if __name__ == "__main__":
