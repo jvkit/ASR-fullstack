@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
 import { showToast } from 'vant'
 
 import LiveTranscript from './components/LiveTranscript.vue'
@@ -36,6 +36,7 @@ interface StartConfig {
   versionMode: VersionMode
   sourceMode: SourceMode
   hotwords: string
+  videoDeviceId: string // 线下摄像头（空=不采集视频）
 }
 
 // 会末版进度（final_progress 推送；详情页另有轮询兜底，这里覆盖"刚结束还在会议页"的场景）
@@ -76,6 +77,14 @@ const onlineMode = ref(false)
 const versionMode = ref<VersionMode>('both') // 本场开会配置（双版本架构，默认都走）
 const screenCapture = new ScreenFrameCapture()
 let pendingDisplayStream: MediaStream | null = null
+// 视频预览（调试：线下=摄像头画面，线上=屏幕画面）；stream 渲染到 previewVideo
+let cameraStream: MediaStream | null = null // 线下摄像头（独立流，需自行停轨）
+const previewStream = ref<MediaStream | null>(null)
+const previewVideo = ref<HTMLVideoElement | null>(null)
+watch(previewStream, async (s) => {
+  await nextTick() // v-if 渲染 video 后再挂 ref
+  if (previewVideo.value) previewVideo.value.srcObject = s
+})
 
 // 说话人配色（按出现顺序循环）
 const speakerColors = ['#e6646c', '#3aa675', '#3b7fe0', '#a06ee1', '#d98e32', '#2ba0b8', '#c2568c', '#6a8f3c']
@@ -155,6 +164,9 @@ function handleMessage(msg: ServerMessage) {
       screenCapture.stop()
       pendingDisplayStream?.getTracks().forEach((t) => t.stop())
       pendingDisplayStream = null
+      cameraStream?.getTracks().forEach((t) => t.stop())
+      cameraStream = null
+      previewStream.value = null
       if (replaying.value) {
         replayFinished.value = true
       }
@@ -194,10 +206,24 @@ async function onStart(payload: StartConfig) {
         audio: true,
         video: { frameRate: 5 },
       })
+      previewStream.value = pendingDisplayStream // 屏幕画面预览（调试）
     } catch (e) {
       showToast({ message: `屏幕分享被取消或失败：${e}`, type: 'fail', duration: 4000 })
       ws.close()
       return
+    }
+  }
+  // 线下会议：按配置打开摄像头，仅画面预览（视频不参与纪要，先保证"看得到采到什么"）
+  if (!onlineMode.value && payload.videoDeviceId) {
+    try {
+      cameraStream = await navigator.mediaDevices.getUserMedia({
+        video: { deviceId: { exact: payload.videoDeviceId } },
+        audio: false,
+      })
+      previewStream.value = cameraStream
+    } catch (e) {
+      showToast({ message: `摄像头打开失败（不影响录音）：${e}`, type: 'warning', duration: 4000 })
+      cameraStream = null
     }
   }
   // 先开麦（拿到 onPcm 回调），再 start —— 回调里检查 ws.ready 防竞态；
@@ -251,6 +277,9 @@ async function onStop() {
   // 会议结束才释放整条 display stream（视频轨提前 stop 会连累系统音频轨）
   pendingDisplayStream?.getTracks().forEach((t) => t.stop())
   pendingDisplayStream = null
+  cameraStream?.getTracks().forEach((t) => t.stop())
+  cameraStream = null
+  previewStream.value = null
   // 立即切回「开始记录」，不等服务端 ended（服务端还要 flush + 最终总结，可能十几秒）
   recording.value = false
   paused.value = false
@@ -407,6 +436,17 @@ onMounted(() => {
           @goto-speakers="view = 'speakers'"
         />
 
+        <!-- 视频画面预览（调试）：线下=摄像头，线上=屏幕内容。muted 防回声 -->
+        <div v-if="recording && previewStream" class="video-preview">
+          <div class="vp-head">
+            <van-tag :type="onlineMode ? 'primary' : 'warning'" size="medium">
+              {{ onlineMode ? '屏幕内容' : '摄像头画面' }}
+            </van-tag>
+            <span class="vp-tip">画面仅本地预览调试，不上行</span>
+          </div>
+          <video ref="previewVideo" class="vp-video" autoplay muted playsinline />
+        </div>
+
         <div v-if="liveAttrs.length" class="live-attrs">
           <van-tag
             v-for="a in liveAttrs"
@@ -485,5 +525,11 @@ html, body, #app { height: 100%; margin: 0; }
 /* 会末版重跑进度（会中视图轻量条） */
 .final-progress { padding: 4px 2px 8px; }
 .fp-text { display: block; font-size: 12px; color: #646566; margin-bottom: 4px; }
+
+/* 视频画面预览（调试） */
+.video-preview { margin: 8px 0; border: 1px solid #ebedf0; border-radius: 8px; overflow: hidden; background: #000; }
+.vp-head { display: flex; align-items: center; gap: 8px; padding: 6px 8px; background: #fafafa; }
+.vp-tip { font-size: 12px; color: #969799; }
+.vp-video { display: block; width: 100%; max-height: 260px; object-fit: contain; }
 
 </style>

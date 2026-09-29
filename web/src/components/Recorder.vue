@@ -15,6 +15,7 @@ const emit = defineEmits<{
     versionMode: VersionMode
     sourceMode: SourceMode
     hotwords: string
+    videoDeviceId: string   // 线下摄像头（空=不采集视频）
   }]
   pause: []
   resume: []
@@ -29,8 +30,9 @@ const showConfig = ref(false)
 const cfg = reactive({
   title: '',
   versionMode: 'both' as VersionMode, // 默认都走：实时版草稿 + 会末版权威
-  sourceMode: 'mic' as SourceMode,    // 线下=纯麦克风；线上=屏幕+系统声（含我开麦了门控）
+  sourceMode: 'mic' as SourceMode,    // 线下=麦克风(+可选摄像头预览)；线上=屏幕+系统声（含我开麦了门控）
   hotwords: '',
+  videoDeviceId: '',                  // 线下摄像头设备 id（空=不采集视频）
 })
 const speakerEmpty = ref(false) // 声纹库为空：弹醒目提醒（会前注册大幅提升分人准确度）
 let speakerChecked = false
@@ -63,6 +65,55 @@ function openConfig() {
   }
 }
 
+// ---------- 线下摄像头：设备枚举 / 刷新 / 选择 ----------
+const videoDevices = ref<{ deviceId: string; label: string }[]>([])
+const showCameraPicker = ref(false)
+const cameraLoading = ref(false)
+
+async function enumerateCameras(): Promise<{ deviceId: string; label: string }[]> {
+  const list = await navigator.mediaDevices.enumerateDevices()
+  return list
+    .filter((d) => d.kind === 'videoinput')
+    .map((d, i) => ({ deviceId: d.deviceId, label: d.label || `摄像头 ${i + 1}` }))
+}
+
+// 未授权时 label 全为空 → 先请求一次摄像头权限（用户点刷新=手势内，合规）再枚举
+async function refreshCameras() {
+  cameraLoading.value = true
+  try {
+    let devs = await enumerateCameras()
+    if (devs.length && devs.every((d) => /^摄像头 \d+$/.test(d.label))) {
+      const s = await navigator.mediaDevices.getUserMedia({ video: true })
+      s.getTracks().forEach((t) => t.stop())
+      devs = await enumerateCameras()
+    }
+    videoDevices.value = devs
+    // 已选设备被拔掉 → 清空选择
+    if (cfg.videoDeviceId && !devs.some((d) => d.deviceId === cfg.videoDeviceId)) {
+      cfg.videoDeviceId = ''
+    }
+  } catch {
+    // 权限被拒也保留列表（可能拿到带空 label 的项），不阻塞开会
+  } finally {
+    cameraLoading.value = false
+  }
+}
+
+const cameraName = computed(() => {
+  if (!cfg.videoDeviceId) return '不采集视频'
+  return videoDevices.value.find((d) => d.deviceId === cfg.videoDeviceId)?.label || '未知设备'
+})
+
+function pickCamera(deviceId: string) {
+  cfg.videoDeviceId = deviceId
+  showCameraPicker.value = false
+}
+
+function onSourceChange(mode: SourceMode) {
+  cfg.sourceMode = mode
+  if (mode === 'mic' && !videoDevices.value.length) refreshCameras()
+}
+
 function confirmConfig() {
   const title = cfg.title.trim() || '未命名会议'
   showConfig.value = false
@@ -72,6 +123,7 @@ function confirmConfig() {
     versionMode: cfg.versionMode,
     sourceMode: cfg.sourceMode,
     hotwords: cfg.hotwords.trim(),
+    videoDeviceId: cfg.sourceMode === 'mic' ? cfg.videoDeviceId : '',
   })
 }
 
@@ -163,12 +215,45 @@ function togglePause() {
 
       <div class="cfg-group-title">音源模式</div>
       <van-radio-group v-model="cfg.sourceMode" class="cfg-radios">
-        <van-cell v-for="o in sourceOptions" :key="o.value" :title="o.label" :label="o.hint" clickable @click="cfg.sourceMode = o.value">
+        <van-cell v-for="o in sourceOptions" :key="o.value" :title="o.label" :label="o.hint" clickable @click="onSourceChange(o.value)">
           <template #right-icon>
             <van-radio :name="o.value" />
           </template>
         </van-cell>
       </van-radio-group>
+
+      <!-- 线下会议：摄像头选择（会议中可预览画面，方便确认采集正常） -->
+      <template v-if="cfg.sourceMode === 'mic'">
+        <div class="cfg-group-title">摄像头（可选，仅画面预览调试，视频暂不参与纪要）</div>
+        <van-cell title="摄像头" :value="cameraName" clickable @click="showCameraPicker = true">
+          <template #right-icon>
+            <van-button size="small" plain type="primary" :loading="cameraLoading" @click.stop="refreshCameras">
+              刷新列表
+            </van-button>
+          </template>
+        </van-cell>
+        <van-action-sheet
+          v-model:show="showCameraPicker"
+          title="选择摄像头"
+          close-on-click-action
+        >
+          <div class="cam-list">
+            <van-cell title="不采集视频" clickable @click="pickCamera('')">
+              <template #right-icon><van-icon v-if="!cfg.videoDeviceId" name="success" color="#ee0a24" /></template>
+            </van-cell>
+            <van-cell
+              v-for="(d, i) in videoDevices"
+              :key="d.deviceId"
+              :title="d.label || `摄像头 ${i + 1}`"
+              clickable
+              @click="pickCamera(d.deviceId)"
+            >
+              <template #right-icon><van-icon v-if="cfg.videoDeviceId === d.deviceId" name="success" color="#ee0a24" /></template>
+            </van-cell>
+            <van-empty v-if="!videoDevices.length && !cameraLoading" description="未检测到摄像头，点上方「刷新列表」重试" />
+          </div>
+        </van-action-sheet>
+      </template>
 
       <van-field
         v-model="cfg.hotwords"
@@ -200,6 +285,7 @@ function togglePause() {
 .warn-line { font-size: 12px; line-height: 1.6; }
 .warn-btn { margin-top: 6px; }
 .hot-label { font-size: 14px; }
+.cam-list { max-height: 50vh; overflow-y: auto; }
 
 @media (min-width: 768px) { .rec-tag { flex: 0; min-width: 80px; } }
 </style>
