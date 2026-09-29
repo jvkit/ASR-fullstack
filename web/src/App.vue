@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 import { showToast } from 'vant'
 
 import LiveTranscript from './components/LiveTranscript.vue'
@@ -77,14 +77,9 @@ const onlineMode = ref(false)
 const versionMode = ref<VersionMode>('both') // 本场开会配置（双版本架构，默认都走）
 const screenCapture = new ScreenFrameCapture()
 let pendingDisplayStream: MediaStream | null = null
-// 视频预览（调试：线下=摄像头画面，线上=屏幕画面）；stream 渲染到 previewVideo
+// 视频预览（调试：线下=摄像头画面，线上=屏幕画面）；.prop 直接绑 DOM srcObject，渲染即生效
 let cameraStream: MediaStream | null = null // 线下摄像头（独立流，需自行停轨）
 const previewStream = ref<MediaStream | null>(null)
-const previewVideo = ref<HTMLVideoElement | null>(null)
-watch(previewStream, async (s) => {
-  await nextTick() // v-if 渲染 video 后再挂 ref
-  if (previewVideo.value) previewVideo.value.srcObject = s
-})
 
 // 说话人配色（按出现顺序循环）
 const speakerColors = ['#e6646c', '#3aa675', '#3b7fe0', '#a06ee1', '#d98e32', '#2ba0b8', '#c2568c', '#6a8f3c']
@@ -444,7 +439,7 @@ onMounted(() => {
             </van-tag>
             <span class="vp-tip">画面仅本地预览调试，不上行</span>
           </div>
-          <video ref="previewVideo" class="vp-video" autoplay muted playsinline />
+          <video :src-object.prop="previewStream" class="vp-video" autoplay muted playsinline />
         </div>
 
         <div v-if="liveAttrs.length" class="live-attrs">
