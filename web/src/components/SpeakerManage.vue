@@ -221,6 +221,55 @@ async function appendStart(name: string) {
   await startRecord()
 }
 
+// ---------- 注册段试听（质检：点开听注册的声音是否本人，防"名字对人声"错位入库） ----------
+const audition = reactive<Record<string, { open: boolean; loading: boolean; segs: any[] }>>({})
+const playingKey = ref('') // "name#i"
+let audioEl: HTMLAudioElement | null = null
+
+async function toggleAudition(name: string) {
+  const a = audition[name] || (audition[name] = { open: false, loading: false, segs: [] })
+  a.open = !a.open
+  if (a.open && !a.segs.length && !a.loading) {
+    a.loading = true
+    try {
+      const r = await fetch(`/api/speakers/${encodeURIComponent(name)}/segments`)
+      const d = await r.json()
+      a.segs = d.segments || []
+    } catch (e) {
+      errorMsg.value = `加载试听段失败：${e}`
+    } finally {
+      a.loading = false
+    }
+  }
+}
+
+function stopPlay() {
+  if (audioEl) {
+    audioEl.pause()
+    audioEl = null
+  }
+  playingKey.value = ''
+}
+
+function togglePlay(name: string, i: number) {
+  const key = `${name}#${i}`
+  if (playingKey.value === key) {
+    stopPlay()
+    return
+  }
+  stopPlay()
+  audioEl = new Audio(`/api/speakers/${encodeURIComponent(name)}/segments/${i}/audio`)
+  audioEl.onended = () => {
+    if (playingKey.value === key) playingKey.value = ''
+  }
+  audioEl.onerror = () => {
+    if (playingKey.value === key) playingKey.value = ''
+    errorMsg.value = '试听音频加载失败'
+  }
+  void audioEl.play()
+  playingKey.value = key
+}
+
 // ---------- 删除 ----------
 async function remove(name: string) {
   try {
@@ -362,8 +411,36 @@ async function remove(name: string) {
       <van-cell v-for="s in speakers" :key="s" :title="s">
         <template #right-icon>
           <div class="row-btns">
+            <van-button
+              size="small"
+              plain
+              :type="audition[s]?.open ? 'warning' : 'success'"
+              @click="toggleAudition(s)"
+            >
+              {{ audition[s]?.open ? '收起' : '试听' }}
+            </van-button>
             <van-button size="small" type="primary" plain @click="appendStart(s)">补录</van-button>
             <van-button size="small" type="danger" plain @click="remove(s)">删除</van-button>
+          </div>
+        </template>
+        <template v-if="audition[s]?.open" #label>
+          <div class="seg-list">
+            <div v-if="audition[s]?.loading" class="tip">加载中…</div>
+            <template v-else>
+              <div v-if="!audition[s]?.segs?.length" class="tip">没有可试听的注册段</div>
+              <div v-for="seg in audition[s]?.segs" :key="seg.i" class="seg-row">
+                <span class="seg-name">段 {{ seg.i }}</span>
+                <span class="seg-dur">{{ seg.dur }}s</span>
+                <van-button
+                  size="mini"
+                  :type="playingKey === s + '#' + seg.i ? 'warning' : 'primary'"
+                  @click="togglePlay(s, seg.i)"
+                >
+                  {{ playingKey === s + '#' + seg.i ? '■ 停止' : '▶ 播放' }}
+                </van-button>
+              </div>
+              <div class="tip">点开听是否本人声音；若混入别人的声纹，删除该人重新注册</div>
+            </template>
           </div>
         </template>
       </van-cell>
@@ -395,4 +472,8 @@ async function remove(name: string) {
 .rank-fill { height: 100%; background: #1989fa; }
 .rank-sim { width: 44px; text-align: right; color: #646566; font-variant-numeric: tabular-nums; }
 .row-btns { display: flex; gap: 8px; }
+.seg-list { padding: 6px 0 2px; }
+.seg-row { display: flex; align-items: center; gap: 10px; margin: 6px 0; }
+.seg-name { width: 44px; color: #323233; font-size: 13px; }
+.seg-dur { flex: 1; color: #969799; font-size: 12px; font-variant-numeric: tabular-nums; }
 </style>

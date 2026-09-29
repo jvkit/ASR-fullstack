@@ -92,6 +92,41 @@ async def identify_speaker(audio: bytes = Body(...)) -> dict:
         raise HTTPException(502, "检测服务不可用，请稍后重试")
 
 
+@router.get("/speakers/{name}/segments")
+async def speaker_segments(name: str) -> dict:
+    """列出某人的全部注册段（前端试听质检用）。"""
+    try:
+        async with httpx.AsyncClient(timeout=15) as cli:
+            r = await cli.get(
+                f"{settings.diarize_http_url}/speaker_segments",
+                params={"name": name},
+            )
+            r.raise_for_status()
+            return r.json()
+    except httpx.HTTPError:
+        logger.exception("speaker_segments failed")
+        raise HTTPException(502, "声纹服务不可用")
+
+
+@router.get("/speakers/{name}/segments/{i}/audio")
+async def speaker_segment_audio(name: str, i: int):
+    """返回某注册段的 wav 音频流（GPU pcm 包装），前端 <audio>/Audio 直接播。"""
+    from fastapi.responses import Response
+    try:
+        async with httpx.AsyncClient(timeout=30) as cli:
+            r = await cli.get(
+                f"{settings.diarize_http_url}/speaker_segment_audio",
+                params={"name": name, "i": i},
+            )
+            if r.status_code == 404:
+                raise HTTPException(404, "注册段不存在")
+            r.raise_for_status()
+            return Response(content=r.content, media_type="audio/wav")
+    except httpx.HTTPError:
+        logger.exception("speaker_segment_audio failed")
+        raise HTTPException(502, "声纹服务不可用")
+
+
 @router.delete("/speakers/{name}")
 async def delete_speaker(name: str) -> dict:
     """真删除：删掉此人全部 pcm 注册段并失效缓存，立即生效。"""

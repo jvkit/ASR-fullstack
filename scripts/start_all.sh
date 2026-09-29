@@ -10,13 +10,14 @@ FRONTEND_PORT=5174
 BACKEND_LOG=/tmp/meeting_backend.log
 FRONTEND_LOG=/tmp/meeting_frontend.log
 
-backend_pid() { pgrep -f "uvicorn app.main:app --host 0.0.0.0 --port $BACKEND_PORT" | head -1; }
-frontend_pid() { pgrep -f "vite preview.*$FRONTEND_PORT" | head -1; }
+# 只匹配真正的服务进程，避开 bash -c / sh -c wrapper（否则 stop 杀不掉真身）
+backend_pid() { pgrep -af "uvicorn app.main:app.*$BACKEND_PORT" | awk '$2 ~ /python/ {print $1; exit}'; }
+frontend_pid() { pgrep -af "vite preview.*$FRONTEND_PORT" | awk '$2 ~ /node/ {print $1; exit}'; }
 
 cmd_start() {
     if [ -z "$(backend_pid)" ]; then
         echo "启动后端 :$BACKEND_PORT ..."
-        (cd server && setsid nohup "$ROOT/.venv/bin/python" -m uvicorn app.main:app \
+        (cd server && setsid --fork nohup "$ROOT/.venv/bin/python" -m uvicorn app.main:app \
             --host 0.0.0.0 --port $BACKEND_PORT > "$BACKEND_LOG" 2>&1 < /dev/null &)
     else
         echo "后端已在跑 (pid $(backend_pid))"
@@ -27,7 +28,7 @@ cmd_start() {
             exit 1
         fi
         echo "启动前端静态服务 :$FRONTEND_PORT (vite preview)..."
-        (cd web && setsid nohup npm run preview -- --port $FRONTEND_PORT --host > "$FRONTEND_LOG" 2>&1 < /dev/null &)
+        (cd web && setsid --fork nohup npm run preview -- --port $FRONTEND_PORT --host > "$FRONTEND_LOG" 2>&1 < /dev/null &)
     else
         echo "前端已在跑 (pid $(frontend_pid))"
     fi
