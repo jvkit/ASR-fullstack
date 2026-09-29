@@ -84,8 +84,8 @@ class MeetingSession:
         from app.core.visual_buffer import VisualBuffer
         self.visual = VisualBuffer(meeting_id)
         # 视觉提示词应用层（None=无视觉；"online"=屏幕共享，"offline"=摄像头）。
-        # 来自 WS start 的 online 标记：线上会议默认屏幕，线下默认关（摄像头场景后续可开）
-        self.visual_app: str | None = "online" if online else None
+        # 线上=屏幕模板；线下=摄像头模板（2026-09-29 起线下摄像头帧进 OCR，白板/PPT 投屏入纪要）
+        self.visual_app: str | None = "online" if online else "offline"
 
         self.enhancer = BatchEnhancer(self)
 
@@ -162,6 +162,23 @@ class MeetingSession:
                 await self._visual_timer_task
             except asyncio.CancelledError:
                 pass
+
+        # final 模式会末冲刷：120s 打拍，尾巴不足一拍的帧在这里补 OCR 落库
+        if self.version_mode == "final" and settings.visual_enabled and self.visual_app:
+            try:
+                from app.core.enhancer import persist_visual_note
+                frames = await self.visual.take_group()
+                if frames:
+                    from app.core.visual_ocr import visual_ocr
+                    text = await visual_ocr(frames, app=self.visual_app)
+                    if text:
+                        await persist_visual_note(self.meeting_id,
+                                                  frames[0][0], frames[-1][0], text)
+                        logger.info("meeting %s visual flush %d-%dms (%d 帧, %d 字)",
+                                    self.meeting_id, frames[0][0], frames[-1][0],
+                                    len(frames), len(text))
+            except Exception:
+                logger.exception("meeting %s visual flush failed（不阻塞）", self.meeting_id)
 
         self._save_recording()
 

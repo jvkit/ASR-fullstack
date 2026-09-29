@@ -81,6 +81,11 @@ let pendingDisplayStream: MediaStream | null = null
 let cameraStream: MediaStream | null = null // 线下摄像头（独立流，需自行停轨）
 const previewStream = ref<MediaStream | null>(null)
 
+// 视觉抽帧的视频源：线上=屏幕流，线下=摄像头流（两者都进 OCR，程序不区分来源）
+function visualSourceStream(): MediaStream | null {
+  return onlineMode.value ? pendingDisplayStream : cameraStream
+}
+
 // ---------- 预览调试面板：流→轨道→video 元素→播放状态，每秒采样 ----------
 const previewDebug = ref('')
 let previewDebugTimer: ReturnType<typeof setInterval> | null = null
@@ -134,13 +139,16 @@ function handleMessage(msg: ServerMessage) {
   switch (msg.type) {
     case 'started':
       meetingId.value = msg.meeting_id
-      // 线上会议：拿到 meeting_id 后启动屏幕抽帧（帧要带 meeting_id 上行）
-      if (onlineMode.value && pendingDisplayStream) {
-        // 用户在浏览器分享条上手动取消分享：video 轨 ended → 只停抽帧，音频不动
-        pendingDisplayStream.getVideoTracks()[0]?.addEventListener('ended', () => {
-          screenCapture.stop()
-        })
-        screenCapture.start(pendingDisplayStream, msg.meeting_id).catch(() => {})
+      // 视觉抽帧上行：线上=屏幕帧，线下=摄像头帧（帧带 meeting_id 送 OCR）
+      {
+        const vs = visualSourceStream()
+        if (vs) {
+          // 用户在浏览器分享条上手动取消分享：video 轨 ended → 只停抽帧，音频不动
+          vs.getVideoTracks()[0]?.addEventListener('ended', () => {
+            screenCapture.stop()
+          })
+          screenCapture.start(vs, msg.meeting_id).catch(() => {})
+        }
       }
       break
     case 'transcript':
@@ -300,8 +308,9 @@ async function onResume() {
   paused.value = false
   await mic.resume()
   ws.resume()
-  if (onlineMode.value && pendingDisplayStream && meetingId.value) {
-    screenCapture.resume(meetingId.value, pendingDisplayStream)
+  const vs = visualSourceStream()
+  if (vs && meetingId.value) {
+    screenCapture.resume(meetingId.value, vs)
   }
 }
 
