@@ -61,3 +61,7 @@ scripts/__pycache__/
 # 2026-10-10：评测大文件与备份不入库
 eval/7444af8235c2/
 backups/
+
+# 段音频产物不入库（2026-10-10）
+server/data/debug/*/segments/
+server/data/debug/*_splits/
