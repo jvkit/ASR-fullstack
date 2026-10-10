@@ -285,7 +285,7 @@ async function rerunReannotate() {
 
 // ---------- 会末陌生人 → 声纹注册（2026-10-01） ----------
 const showEnroll = ref(false)
-const unknownClusters = ref<{ label: string; seg_count: number; total_ms: number }[]>([])
+const unknownClusters = ref<{ label: string; seg_count: number; total_ms: number; current_speaker?: string }[]>([])
 
 async function loadUnknownClusters() {
   if (!reannotated.value) {
@@ -296,7 +296,9 @@ async function loadUnknownClusters() {
     const r = await fetch(`/api/meetings/${props.meetingId}/unknown_clusters`)
     const d = await r.json()
     unknownClusters.value = d.clusters || []
-  } catch { /* 下次 load 再探 */ }
+  } catch (e) {
+    console.warn('loadUnknownClusters 失败:', e)  // 别静默失败，方便定位
+  }
 }
 
 function isUnknownSpeaker(speaker: string): boolean {
@@ -514,15 +516,15 @@ async function downloadMarkdown() {
           </div>
         </div>
 
-        <!-- 会末版：未识别说话人 → 声纹注册入口 -->
+        <!-- 会末版：全部簇 → 注册/重注册入口（2026-10-10 开放版：含已识别簇） -->
         <div v-if="scope === 'final' && unknownClusters.length" class="enroll-banner">
           <AppIcon name="users" :size="15" />
           <span>
-            发现 {{ unknownClusters.length }} 位未识别说话人（{{
-              unknownClusters.map((c) => c.label).join('、')
-            }}），可试听片段并注册为声纹
+            会末版分出 {{ unknownClusters.length }} 个簇（{{
+              unknownClusters.map((c) => `${c.label}·${c.current_speaker || '?'}(${Math.round(c.total_ms / 1000)}s)`).join('、')
+            }}），可勾选注册/重注册为声纹
           </span>
-          <button class="btn btn-sm btn-primary" @click="showEnroll = true">注册声纹</button>
+          <button class="btn btn-sm btn-primary" @click="showEnroll = true">注册/重注册</button>
         </div>
 
         <!-- 对照视图：左栏转写（波次虚线分隔）+ 右栏纪要卡按时间对齐 -->

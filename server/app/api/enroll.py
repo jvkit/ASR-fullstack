@@ -26,7 +26,7 @@ from sqlalchemy import select
 
 from app.config import settings
 from app.db.database import SessionLocal
-from app.db.models import Meeting, ReAnnotateUtterance
+from app.db.models import DiarSegment, Meeting, ReAnnotateUtterance
 
 logger = logging.getLogger(__name__)
 
@@ -201,30 +201,54 @@ def _read_wav_pcm(data: bytes) -> bytes:
 
 @router.post("/meetings/{meeting_id}/enroll_cluster")
 async def enroll_cluster(meeting_id: str, payload: dict = Body(...)) -> dict:
-    """勾选段拼接 → GPU speaker_enroll 注册。
+    """勾选段拼接 → GPU speaker_enroll 注册（2026-10-10 开放版）。
 
-    payload: {name, labels: ["说话人2", ...], exclude_seqs: [int, ...]}
-    段音频来自会末重标注落盘文件，已是降噪域（与会议推理同一信号处理），
-    因此不再过 denoise（speakers/enroll 的降噪是为麦克风直录裸音准备的）。
-    GPU 端仍会做 VAD 切段 + 质量/一致性过滤，混进去的坏段会被再筛一轮。
+    payload: {
+      name,                            # 注册目标名（新名字=新注册，已有名=补录/合并）
+      labels: ["说话人2", ...],        # 旧：按会末判名筛选（未识别簇）
+      cluster_labels: ["1", "4", ...], # 新：按 3D 聚类簇筛选（含已识别簇，支持错判覆盖）
+      exclude_seqs: [int, ...],        # 剔除的段 seq
+      trims: {seq: [start_ms, end_ms], ...}  # 段内裁剪：只保留该范围的音频（毫秒，相对段首）
+    }
+    两种筛选二选一（cluster_labels 优先）。trims 用于句尾剪错时保留中段。
     """
     name = str(payload.get("name") or "").strip()
     labels = [str(x) for x in (payload.get("labels") or [])]
     exclude = set(int(x) for x in (payload.get("exclude_seqs") or []))
+    trims = {int(k): [float(v[0]), float(v[1])] for k, v in (payload.get("trims") or {}).items()}
     if not name or len(name) > 32:
         raise HTTPException(400, "姓名必填且 ≤32 字")
-    if not labels:
+    labels = [str(x) for x in (payload.get("labels") or [])]
+    cluster_labels = [str(x) for x in (payload.get("cluster_labels") or [])]
+    if not labels and not cluster_labels:
         raise HTTPException(400, "至少选择一个说话人簇")
 
     async with SessionLocal() as db:
         if not await db.get(Meeting, meeting_id):
             raise HTTPException(404, "meeting not found")
-        rows = (await db.execute(
-            select(ReAnnotateUtterance)
-            .where(ReAnnotateUtterance.meeting_id == meeting_id)
-            .where(ReAnnotateUtterance.speaker.in_(labels))
-            .order_by(ReAnnotateUtterance.start_ms)
-        )).scalars().all()
+        if cluster_labels:
+            # 新簇键（cluster_label）——需按 seq2label 反查（与 unknown_clusters 同逻辑）
+            rows_all = (await db.execute(
+                select(ReAnnotateUtterance)
+                .where(ReAnnotateUtterance.meeting_id == meeting_id)
+                .order_by(ReAnnotateUtterance.seq)
+            )).scalars().all()
+            diar_rows = (await db.execute(
+                select(DiarSegment)
+                .where(DiarSegment.meeting_id == meeting_id)
+                .where(DiarSegment.source == "final")
+                .order_by(DiarSegment.start_ms)
+            )).scalars().all()
+            label_map = {d.start_ms: (d.cluster_label or "0") for d in diar_rows}
+            rows = [r for r in rows_all
+                    if str(label_map.get(r.start_ms, "0")) in set(cluster_labels)]
+        else:
+            rows = (await db.execute(
+                select(ReAnnotateUtterance)
+                .where(ReAnnotateUtterance.meeting_id == meeting_id)
+                .where(ReAnnotateUtterance.speaker.in_(labels))
+                .order_by(ReAnnotateUtterance.start_ms)
+            )).scalars().all()
 
     chunks: list[bytes] = []
     used = 0
@@ -235,7 +259,16 @@ async def enroll_cluster(meeting_id: str, payload: dict = Body(...)) -> dict:
         if not path.is_file():
             continue
         try:
-            chunks.append(_read_wav_pcm(path.read_bytes()))
+            piece = _read_wav_pcm(path.read_bytes())
+            if r.seq in trims:
+                a_ms, b_ms = trims[r.seq]
+                s0 = max(0, int(a_ms * 32))
+                s1 = min(len(piece), int(b_ms * 32))
+                if s1 - s0 >= 16000:  # 裁剪后 ≥0.5s 才保留
+                    piece = piece[s0 // 2 * 2:s1 // 2 * 2]
+                else:
+                    continue  # 裁没了 = 剔除
+            chunks.append(piece)
             used += 1
         except Exception:
             logger.warning("enroll_cluster %s: bad wav %s", meeting_id, path)
@@ -268,3 +301,37 @@ async def enroll_cluster(meeting_id: str, payload: dict = Body(...)) -> dict:
     logger.info("enroll_cluster %s: %s <- %s（勾选 %d 段，GPU kept=%s）",
                 meeting_id, name, labels, used, result.get("kept"))
     return {**result, "meeting_id": meeting_id, "name": name, "used_segments": used}
+
+
+@router.get("/meetings/{meeting_id}/segments/{seq}/trim_audio")
+async def segment_trim_audio(meeting_id: str, seq: int, start_ms: int = 0, end_ms: int = 0):
+    """段内裁剪预览：按 [start_ms, end_ms]（相对段首）截取音频返回。
+
+    前端波形编辑器实时试听裁剪范围用；不落地、不改原文件。
+    """
+    from fastapi.responses import Response
+    async with SessionLocal() as db:
+        row = (await db.execute(
+            select(ReAnnotateUtterance)
+            .where(ReAnnotateUtterance.meeting_id == meeting_id)
+            .where(ReAnnotateUtterance.seq == seq)
+        )).scalar_one_or_none()
+    if not row or not row.audio_path:
+        raise HTTPException(404, "segment audio not found")
+    path = _seg_abs_path(row.audio_path)
+    if not path.is_file():
+        raise HTTPException(404, "segment audio file missing")
+    pcm = _read_wav_pcm(path.read_bytes())
+    s0 = max(0, int(start_ms) * 32)
+    s1 = min(len(pcm), int(end_ms) * 32) if end_ms else len(pcm)
+    if s1 <= s0:
+        raise HTTPException(400, "裁剪范围无效")
+    pcm = pcm[s0 // 2 * 2:s1 // 2 * 2]
+    import io as _io
+    buf = _io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(16000)
+        w.writeframes(pcm)
+    return Response(content=buf.getvalue(), media_type="audio/wav")
