@@ -59,6 +59,7 @@ async def run_final_pass(session: MeetingSession) -> bool:
     """
     from app.core.enhancer import BatchEnhancer
     from app.core.reannotate import reannotate
+    from app.core.visual_rerun import rerun_ocr_for_meeting
 
     meeting_id = session.meeting_id
     broadcast = session.broadcast
@@ -88,6 +89,15 @@ async def run_final_pass(session: MeetingSession) -> bool:
     # 否则下面波次 _load_visual_notes 按时间窗查不到（2026-09-29 竞态修复）
     if settings.visual_enabled and session.visual_app:
         await session.wait_visual_drained()
+
+    # 2.6) 重跑 OCR（2026-10-10）：历史会议无内存帧，重跑会末版时 VisualNote 空。
+    # 开关 config visual_rerun_enabled；接入视频持久化后换真帧（当前占位出空文）。
+    if settings.visual_rerun_enabled and not session.visual_app:
+        try:
+            n = await rerun_ocr_for_meeting(meeting_id)
+            logger.info("final pass %s: 重跑 OCR 产出 %d 条", meeting_id, n)
+        except Exception:
+            logger.exception("final pass %s: 重跑 OCR 失败（不阻塞）", meeting_id)
 
     # 2) 读 utterances_re（会末版唯一原文源；说话人已 keep_anon 区分个体）
     async with SessionLocal() as db:

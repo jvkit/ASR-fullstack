@@ -202,8 +202,14 @@ class Settings(BaseSettings):
     # 段级标红阈值：段 vs 簇/质心相似度低于此值标红"疑似混入他人"（仅提示不拦截）
     enroll_seg_warn_sim: float = 0.50
     segments_sim_timeout_sec: float = 120.0
-    visual_llm_model: str = "new"             # 多模态池（chat 池对图片请求报错，唯一可用 new）
+    # 2026-10-10：网关 model='new' 已下线（只剩 'chat'），实测 chat 现在支持图片输入
+    # （vllm-0.31.0 多模态），改回 chat。若 chat 再对图片报错，检查网关模型列表换可用的。
+    visual_llm_model: str = "chat"
     visual_llm_timeout_sec: int = 300         # 多帧读图分钟级，给足余量
+    # 重跑 OCR 开关（2026-10-10）：历史会议无内存帧缓冲，重跑会末版时 VisualNote 空。
+    # 开启后从整轨按间隔抽帧跑 OCR（当前是占位伪帧，出空文；接入视频持久化后换真帧）。
+    # 默认关——等视频抽帧落地再开。
+    visual_rerun_enabled: bool = False
     visual_prompt_app: str = "online"         # online | offline（提示词模板选择）
     visual_max_buffer_frames: int = 24        # 帧缓冲上限（≈4min 积压容量，防雪球）
     # final-only 模式的视觉 OCR 节拍（2026-09-28）：final 模式没有会中波次，OCR 缺节拍器，
