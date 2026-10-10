@@ -60,8 +60,8 @@ async def meeting_chunk(pcm: bytes, hotwords: str = "", timeout_sec: float | Non
     final: True=会末终版（兜底发号+尾音归属+显示降级）；False=会中批次。
     """
     try:
-        from app.core.preprocess import denoise_pcm
-        pcm = denoise_pcm(pcm)  # 集中降噪层：会中批次/会末重标注共用此入口
+        from app.core.preprocess import denoise_async
+        pcm = await denoise_async(pcm)  # 集中降噪层：会中批次/会末重标注共用此入口
         data: dict = {
             "name_threshold": str(settings.reannotate_name_threshold),
             "max_end_silence_ms": str(settings.pipeline_vad_max_end_silence_ms),
@@ -89,18 +89,18 @@ async def meeting_chunk(pcm: bytes, hotwords: str = "", timeout_sec: float | Non
 
 
 async def meeting_chunk_3ds(pcm: bytes, hotwords: str = "", timeout_sec: float | None = None) -> tuple | None:
-    """会中批次 3D-Speaker 路径（P1 换芯，2026-09-28）：降噪 → 本地3D聚类 → GPU 认人+转写。
+    """会中批次 3D-Speaker 路径（P1 换芯，2026-09-28）：远端 3D 聚类 → GPU 认人+转写。
 
+    pcm 必须已过 preprocess 降噪（session 批次循环统一降噪，2026-09-30 起降噪本身
+    也在 GPU 服务器 /denoise 完成，本机零 torch）。
     与 meeting_chunk 同契约：返回 (segs, [])，segs=[{start,end,speaker,text}]（秒），
     失败 None。无声纹命中的匿名簇统一映射"未识别"（用户拍板：不再保留"说话人N"
     兜底号做区分）。旧 meeting_chunk（自研 VAD 批次路径）保留供回滚，不再被会中调用。
     """
     try:
-        from app.core.preprocess import denoise_pcm
-        import app.core.diarize3ds as diarize3ds
-
-        pcm = denoise_pcm(pcm)
-        segments = await asyncio.to_thread(diarize3ds.diarize, pcm)
+        segments = await diarize_full(pcm)
+        if segments is None:
+            return None
         if not segments:
             return [], []
         segs = await identify_segments(
@@ -116,6 +116,31 @@ async def meeting_chunk_3ds(pcm: bytes, hotwords: str = "", timeout_sec: float |
         return segs, []
     except Exception:
         logger.exception("meeting_chunk_3ds failed")
+        return None
+
+
+async def diarize_full(pcm: bytes, timeout_sec: float | None = None) -> list[dict] | None:
+    """远端 3D-Speaker 分离（GPU 服务器 /diarize_full）。
+
+    2026-09-30 收编：取代本地 diarize3ds.diarize（CPU torch），同一 third_party
+    源码与聚类参数，本机零 torch。pcm 为 int16/16k/mono（调用前已过降噪）。
+    嵌入可选：config diar3ds_emb="ere" 时用 ERes2NetV2（与声纹库同尺子，
+    2026-10-10 7444 实测 CAM++ 分不开同场两人；ere 簇内 0.78~0.92）。
+    返回 [{start, end, cluster_id}]（秒）；失败返回 None。
+    """
+    try:
+        async with httpx.AsyncClient(
+            timeout=timeout_sec or settings.diarize_full_timeout_sec
+        ) as cli:
+            r = await cli.post(
+                f"{settings.diarize_http_url}/diarize_full",
+                files={"file": ("chunk.wav", pcm_to_wav(pcm), "audio/wav")},
+                data={"emb": settings.diar3ds_emb},
+            )
+            r.raise_for_status()
+            return r.json().get("segs", [])
+    except Exception:
+        logger.exception("diarize_full failed")
         return None
 
 

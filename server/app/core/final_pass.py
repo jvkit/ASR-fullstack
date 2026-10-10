@@ -1,4 +1,4 @@
-"""会末版（final）管道：重标注终版 → 波次 LLM → 会末最终总结。
+"""会末版（final）管道：重标注终版 → 并行波次 LLM → 会末最终总结。
 
 双版本架构（2026-09-28 用户拍板）：实时版（live）与会末版（final）是独立管道、互不
 纠正，只复用声纹库/视觉/录音。会末版以整场录音重跑（reannotate）的 utterances_re
@@ -6,20 +6,22 @@
 
     reannotate（降噪→3D-Speaker→GPU 认人+转写，现有函数复用）
     → utterances_re 按 120s 固定窗分波（final_wave_sec，不对齐 OCR/批次边界）
-    → 逐波调与实时版同一套波次 LLM（enhancer._llm_enhance + prompts 同一套）：
-      输入原文 = utterances_re 行（说话人: 文本）、上下文 = 前 5 波会末段纪要、
-      VisualNote 按 [波.start, 波.end] 查出拼进 ocr_text（复用不重的 OCR）；
-      纠错写回 utterances_re.text，段纪要落 Summary(scope='final', seq=1..N)
+    → 全部波次并发调 LLM（2026-10-01 用户拍板「冗余上下文」模式，见 prompts
+      FINAL_WAVE_SYSTEM）：输入 = 前一波原文+本波原文+后一波原文，只纠错/总结
+      本波——波间零依赖（不要「上一波段纪要」），semaphore 限流 final_wave_parallel；
+      纠错写回 utterances_re.text（每句全场仅纠一次），段纪要落 Summary(scope='final')
     → 全部会末段纪要归约出会末最终总结（extract_final_attributes 复用）：
       Summary(scope='final', seq=0, action_items=结构化待办) + meeting 元信息
 
 失败语义与实时版一致（用户原则）：某波 LLM 失败记日志跳过（该波无段纪要、原文留
 草稿），不重试不累积补做；reannotate 失败 = 会末版整体终止（无原文源，绝不回退
-旧聚类）。
+旧聚类）。全流程状态落 meeting.final_status（running/done/failed），
+前端「终版已出」以此为准。
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from typing import TYPE_CHECKING
@@ -30,13 +32,22 @@ from app.config import settings
 from app.db import event_stages
 from app.db.database import SessionLocal
 from app.db.events import log_event
-from app.db.models import Meeting, ReAnnotateUtterance, Summary, VisualNote
+from app.db.models import Meeting, ReAnnotateUtterance, Summary, VisualNote, title_is_default
 from app.llm import client as llm_client
 
 if TYPE_CHECKING:
     from app.core.session import MeetingSession
 
 logger = logging.getLogger(__name__)
+
+
+async def _set_final_status(meeting_id: str, status: str) -> None:
+    """会末版全流程状态（'' | running | done | failed），前端「终版已出」以此为准。"""
+    async with SessionLocal() as db:
+        await db.execute(
+            Meeting.__table__.update().where(Meeting.id == meeting_id).values(final_status=status)
+        )
+        await db.commit()
 
 
 async def run_final_pass(session: MeetingSession) -> bool:
@@ -46,17 +57,28 @@ async def run_final_pass(session: MeetingSession) -> bool:
     → 每波 summary(scope=final) → final_progress(summary,85) → summary(scope=final,seq=0)
     → final_progress(done,100) → final_done。
     """
-    from app.core.enhancer import BatchEnhancer, _llm_enhance
+    from app.core.enhancer import BatchEnhancer
     from app.core.reannotate import reannotate
 
     meeting_id = session.meeting_id
     broadcast = session.broadcast
+
+    await _set_final_status(meeting_id, "running")
+    # 重跑幂等：清掉旧的会末版段纪要/终版（正常会末流程本无此行，删除是空操作）
+    async with SessionLocal() as db:
+        await db.execute(
+            Summary.__table__.delete()
+            .where(Summary.meeting_id == meeting_id)
+            .where(Summary.scope == "final")
+        )
+        await db.commit()
 
     await log_event(meeting_id, event_stages.REANNOTATE_START)
     # 1) 全场重跑 → utterances_re（复用现有 reannotate；失败=会末版整体失败，不回退）
     await broadcast({"type": "final_progress", "stage": "reannotate", "pct": 5})
     if not await reannotate(meeting_id, bytes(session._audio)):
         await log_event(meeting_id, event_stages.REANNOTATE_END, ok=False)
+        await _set_final_status(meeting_id, "failed")
         logger.error("final pass %s: reannotate failed, 会末版终止", meeting_id)
         return False
     await log_event(meeting_id, event_stages.REANNOTATE_END, ok=True)
@@ -80,6 +102,7 @@ async def run_final_pass(session: MeetingSession) -> bool:
             for r in rows
         ]
     if not utts:
+        await _set_final_status(meeting_id, "failed")
         logger.error("final pass %s: utterances_re 为空，会末版终止", meeting_id)
         return False
 
@@ -92,43 +115,49 @@ async def run_final_pass(session: MeetingSession) -> bool:
         waves.setdefault(u["start_ms"] // wave_ms, []).append(u)
     wave_keys = sorted(waves)
 
-    segments: list[dict] = []              # 会末段纪要（append-only：上下文 + 最终总结输入）
+    segments: list[dict] = []              # 会末段纪要（append-only，最终总结输入）
     all_actions: list[dict] = []           # 各波 action_items 累积（最终总结待办清单原料）
-    prev_lines: list[tuple[str, str]] = []  # 上一波原文（稀疏订正输入，同实时版契约）
-    prev_items: list[dict] = []            # 上一波行（i → 行 id，供 prev_corrections 写回）
-    n_ctx = settings.summary_context_segments
 
-    for wi, wk in enumerate(wave_keys):
-        items = waves[wk]
-        cur_raw = [(u["speaker"], u["text"]) for u in items]
+    # 全并行波次（2026-10-01 用户拍板「冗余上下文」模式）：每波输入 = 前一波原文 +
+    # 本波原文 + 后一波原文，只纠错/总结本波——波间零依赖（不再要「上一波段纪要」），
+    # 全部波次并发（信号量限流），N×LLM 串行时长 → ~1×。每句原文全场仅被纠一次。
+    sem = asyncio.Semaphore(max(1, settings.final_wave_parallel))
+
+    async def _one_wave(wi: int) -> dict:
+        items = waves[wave_keys[wi]]
         w_start = min(u["start_ms"] for u in items)
         w_end = max(u["end_ms"] for u in items)
         ocr_text = await _load_visual_notes(meeting_id, w_start, w_end)
+        cur_raw = [(u["speaker"], u["text"]) for u in items]
+        before_raw = [(u["speaker"], u["text"]) for u in waves[wave_keys[wi - 1]]] \
+            if wi > 0 else []
+        after_raw = [(u["speaker"], u["text"]) for u in waves[wave_keys[wi + 1]]] \
+            if wi < len(wave_keys) - 1 else []
+        async with sem:
+            result = await _llm_final_wave(before_raw, cur_raw, after_raw,
+                                           ocr_text=ocr_text, meeting_id=meeting_id,
+                                           seq=wi + 1)
+        return {"wi": wi, "items": items, "cur_raw": cur_raw, "result": result,
+                "ocr_text": ocr_text, "w_start": w_start, "w_end": w_end}
 
-        # 上下文滑动窗口与实时版同规则：前 N 波（排除最后一波——它单独给，因为要订正）
-        ctx = segments[-(n_ctx + 1):-1] if len(segments) > 1 else []
-        ctx_summaries = [BatchEnhancer._fmt_segment(s) for s in ctx]
-        prev_summary = segments[-1]["content"] if segments else ""
+    results = await asyncio.gather(*(_one_wave(wi) for wi in range(len(wave_keys))))
 
-        result = await _llm_enhance(ctx_summaries, prev_summary, prev_lines, cur_raw,
-                                    ocr_text=ocr_text, meeting_id=meeting_id,
-                                    scope="final", seq=len(segments) + 1)
+    # 按波序处理结果：纠错写回 + 段纪要落库/广播（seq 保持连续，失败波跳过不补）
+    for r in sorted(results, key=lambda x: x["wi"]):
+        wi, items, cur_raw, result = r["wi"], r["items"], r["cur_raw"], r["result"]
         pct = 30 + int(55 * (wi + 1) / len(wave_keys))
         if result is None:
             # 失败不兜底（同实时版原则）：记日志跳过，本波无段纪要、文字留草稿
             logger.error("final pass %s: 会末波 %d/%d LLM 失败，跳过",
                          meeting_id, wi + 1, len(wave_keys))
-            prev_lines = cur_raw
-            prev_items = items
             await broadcast({"type": "final_progress", "stage": "waves", "pct": pct})
             continue
 
-        # 纠错写回 utterances_re（按显式行号 i 对齐，与实时版同一套契约：
-        # 模型漏行只影响漏掉的行，越界/非法行号忽略，不整波失败）
+        # 纠错写回 utterances_re（只纠本波；按显式行号 i 对齐：模型漏行只影响
+        # 漏掉的行，越界/非法行号忽略，不整波失败）
         lines = result["lines"]
         n_cur = len(cur_raw)
         updates: list[tuple[int, str, str]] = []  # (row_id, speaker, text)
-        corrected_cur: list[tuple[str, str]] = list(cur_raw)
         for d in lines:
             i = d.get("i")
             if not isinstance(i, int) or not (0 <= i < n_cur):
@@ -140,24 +169,8 @@ async def run_final_pass(session: MeetingSession) -> bool:
             if spk:
                 u["speaker"] = spk
             u["text"] = txt
-            corrected_cur[i] = (u["speaker"], txt)
+            cur_raw[i] = (u["speaker"], txt)
             updates.append((u["id"], u["speaker"], txt))
-
-        # 上一波稀疏订正（按 i 指回上一波原文，写回 utterances_re）
-        n_prev_applied = 0
-        for c in result["prev_corrections"]:
-            i = c.get("i")
-            if not isinstance(i, int) or not (0 <= i < len(prev_items)):
-                continue
-            spk, txt = str(c.get("speaker", "")).strip(), str(c.get("text", "")).strip()
-            if not txt:
-                continue
-            pu = prev_items[i]
-            if spk:
-                pu["speaker"] = spk
-            pu["text"] = txt
-            updates.append((pu["id"], pu["speaker"], txt))
-            n_prev_applied += 1
 
         if updates:
             async with SessionLocal() as db:
@@ -169,21 +182,6 @@ async def run_final_pass(session: MeetingSession) -> bool:
                     )
                 await db.commit()
 
-        # 订正上一波段纪要（LLM 判断无需改动时原样返回，此时不落库不广播）
-        prev_sum = (result.get("prev_summary") or "").strip()
-        if prev_sum and segments and prev_sum != segments[-1]["content"]:
-            segments[-1]["content"] = prev_sum
-            async with SessionLocal() as db:
-                await db.execute(
-                    Summary.__table__.update()
-                    .where(Summary.meeting_id == meeting_id)
-                    .where(Summary.seq == segments[-1]["seq"])
-                    .where(Summary.scope == "final")
-                    .values(content=prev_sum, title=segments[-1]["title"])
-                )
-                await db.commit()
-            await _broadcast_segment(session, segments[-1], final=False)
-
         # 本波段纪要：append 落库 + 广播（seq 1..N，scope='final' 与实时版区分）
         summary = (result.get("summary") or "").strip()
         actions = result.get("action_items") or []
@@ -193,22 +191,18 @@ async def run_final_pass(session: MeetingSession) -> bool:
                 "seq": len(segments) + 1,
                 "title": (result.get("title") or "").strip() or f"第{len(segments) + 1}段",
                 "content": summary,
-                "start_ms": w_start,
-                "end_ms": w_end,
+                "start_ms": r["w_start"],
+                "end_ms": r["w_end"],
                 "window_text": "\n".join(f"{s}: {t}" for s, t in cur_raw),
                 "action_items": actions,
             }
             segments.append(seg)
-            await _persist_segment(meeting_id, seg, ocr_text=ocr_text)
+            await _persist_segment(meeting_id, seg, ocr_text=r["ocr_text"])
             await _broadcast_segment(session, seg, final=False)
 
-        prev_lines = corrected_cur
-        prev_items = items
         await broadcast({"type": "final_progress", "stage": "waves", "pct": pct})
-        logger.info("final pass %s: 会末波 %d/%d 完成（%d 句，订正上一波 %d 句，"
-                    "累计段纪要 %d 段）",
-                    meeting_id, wi + 1, len(wave_keys), n_cur, n_prev_applied,
-                    len(segments))
+        logger.info("final pass %s: 会末波 %d/%d 完成（%d 句，累计段纪要 %d 段）",
+                    meeting_id, wi + 1, len(wave_keys), n_cur, len(segments))
 
     # 4) 会末最终总结：输入 = 全部会末段纪要拼接（不碰原始全文，同实时版归约原则）；
     #    待办清单 = LLM 归约 + 各波 action_items 拼接，按 quote 去重
@@ -228,7 +222,8 @@ async def run_final_pass(session: MeetingSession) -> bool:
     final_tags = result["tags"][:settings.final_tags_count]
 
     if final_summary:
-        async with SessionLocal() as db:
+        # _meta_lock：与 live 收尾 gather 并行时，元信息读-改-写串行化（2026-10-01）
+        async with session._meta_lock, SessionLocal() as db:
             db.add(Summary(
                 meeting_id=meeting_id,
                 seq=0,                        # 终版专用号（同实时版约定）
@@ -245,7 +240,8 @@ async def run_final_pass(session: MeetingSession) -> bool:
                 # both 模式 live 已落 title/tags → final 不覆盖；attributes 按 key 合并
                 # （live 优先，同实时版「滚动版优先」语义）；action_items 以 final 为准
                 live_done = session.version_mode == "both"
-                if final_title and not live_done:
+                # 用户手填的标题永不覆盖；只有默认占位标题才允许 AI 提炼覆盖
+                if final_title and not live_done and title_is_default(meeting.title):
                     meeting.title = final_title
                 if final_tags and not live_done:
                     meeting.tags = json.dumps(final_tags, ensure_ascii=False)
@@ -285,9 +281,31 @@ async def run_final_pass(session: MeetingSession) -> bool:
 
     await broadcast({"type": "final_progress", "stage": "done", "pct": 100})
     await broadcast({"type": "final_done", "meeting_id": meeting_id})
+    await _set_final_status(meeting_id, "done")
     logger.info("final pass %s done（%d 波，%d 段会末纪要）",
                 meeting_id, len(wave_keys), len(segments))
     return True
+
+
+async def _llm_final_wave(before_lines: list[tuple[str, str]],
+                          cur_lines: list[tuple[str, str]],
+                          after_lines: list[tuple[str, str]],
+                          ocr_text: str = "", *, meeting_id: str = "",
+                          seq: int = 0) -> dict | None:
+    """会末并行波 LLM 调用（冗余上下文模式）。失败/超时返回 None（跳过不补）。"""
+    from app.core.enhancer import _idx_rows, call_wave_llm
+
+    messages = llm_client.build_final_wave_messages(before_lines, cur_lines,
+                                                    after_lines, ocr_text=ocr_text)
+    data = await call_wave_llm(messages, meeting_id=meeting_id, scope="final", seq=seq)
+    if data is None:
+        return None
+    return {
+        "lines": _idx_rows(data, "lines"),
+        "summary": str(data.get("summary", "")).strip(),
+        "title": str(data.get("title", "")).strip(),
+        "action_items": llm_client.parse_action_items(data.get("action_items")),
+    }
 
 
 async def _load_visual_notes(meeting_id: str, start_ms: int, end_ms: int) -> str:
@@ -312,6 +330,8 @@ async def _persist_segment(meeting_id: str, seg: dict, ocr_text: str = "") -> No
             meeting_id=meeting_id,
             seq=seg["seq"],
             scope="final",
+            start_ms=seg["start_ms"],
+            end_ms=seg["end_ms"],
             window_text=seg["window_text"],
             ocr_text=ocr_text,
             content=seg["content"],
@@ -331,6 +351,68 @@ async def _broadcast_segment(session: MeetingSession, seg: dict, final: bool) ->
         "final": final,
         "title": seg["title"],
         "points": points,
+        "start_ms": seg["start_ms"],  # 纪要↔转写联动定位
+        "end_ms": seg["end_ms"],
         "action_items": seg.get("action_items") or [],
         "attributes": [],
     })
+
+
+# ---------- 手动重跑（无会话 shim，2026-10-01） ----------
+
+
+class _StandaloneSession:
+    """手动重跑会末版的最小会话 shim：无 WS 广播（空操作），音频从盘上读。
+
+    run_final_pass 用到的会话面：meeting_id / broadcast / _audio / visual_app /
+    replay_of / client_replay / version_mode——shim 全部按"历史会议重跑"语义补齐。
+    """
+
+    def __init__(self, meeting_id: str, audio: bytes, version_mode: str) -> None:
+        import asyncio
+
+        self.meeting_id = meeting_id
+        self._audio = audio
+        self.version_mode = version_mode  # 真实 mode：both 时不覆盖 live 已落的标题/标签
+        self.replay_of = None
+        self.client_replay = False
+        self.visual_app = None            # 历史会议重跑不重收视觉；VisualNote 复用库里已有
+        self._meta_lock = asyncio.Lock()  # 单会话重跑无争用，仅为满足 run_final_pass 会话面
+
+    async def broadcast(self, _msg: dict) -> None:
+        return
+
+
+async def rerun_final_pass_standalone(meeting_id: str) -> bool:
+    """从盘上录音完整重跑会末版（重标注 → 波次纪要 → 会末总结）。
+
+    供手动「重新标注」/ 声纹注册后刷新使用：这次重跑会带上最新的声纹库，
+    新注册的人名会同时刷新转写与段纪要/会末总结。异常也落 failed 状态。
+    """
+    import contextlib
+    import io
+    import wave
+    from pathlib import Path
+
+    wav = Path(settings.recordings_dir) / f"{meeting_id}.wav"
+    if not wav.is_file():
+        return False
+    raw = wav.read_bytes()
+    pcm = raw
+    with contextlib.suppress(Exception):
+        with wave.open(io.BytesIO(raw), "rb") as w:
+            pcm = w.readframes(w.getnframes())
+
+    async with SessionLocal() as db:
+        meeting = await db.get(Meeting, meeting_id)
+        if not meeting:
+            return False
+        version_mode = meeting.version_mode or "final"
+
+    shim = _StandaloneSession(meeting_id, pcm, version_mode)
+    try:
+        return await run_final_pass(shim)  # type: ignore[arg-type]
+    except Exception:
+        logger.exception("standalone final pass %s failed", meeting_id)
+        await _set_final_status(meeting_id, "failed")
+        return False

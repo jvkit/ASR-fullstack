@@ -271,7 +271,7 @@ class BatchEnhancer:
                 "action_items": result.get("action_items") or [],
             }
             self._segments.append(seg)
-            await self._persist_segment(seg)
+            await self._persist_segment(seg, ocr_text=ocr_text)
             await self._broadcast_segment(seg, final=False)
 
         # 本波登记为「上一波」，供下一波稀疏订正（用纠错后的文本，失败行保留原文）
@@ -294,7 +294,7 @@ class BatchEnhancer:
         """全部段纪要拼接——会末大总结的唯一输入（不含原始转写全文）。"""
         return "\n\n".join(self._fmt_segment(s) for s in self._segments)
 
-    async def _persist_segment(self, seg: dict, update: bool = False) -> None:
+    async def _persist_segment(self, seg: dict, update: bool = False, ocr_text: str = "") -> None:
         from app.db.database import SessionLocal
         from app.db.models import Summary
 
@@ -304,7 +304,9 @@ class BatchEnhancer:
                     Summary.__table__.update()
                     .where(Summary.meeting_id == self._session.meeting_id)
                     .where(Summary.seq == seg["seq"])
+                    .where(Summary.scope == "live")
                     .values(content=seg["content"], title=seg["title"],
+                            start_ms=seg["start_ms"], end_ms=seg["end_ms"],
                             action_items=json.dumps(seg.get("action_items") or [],
                                                     ensure_ascii=False))
                 )
@@ -313,6 +315,8 @@ class BatchEnhancer:
                     meeting_id=self._session.meeting_id,
                     seq=seg["seq"],
                     scope="live",   # 实时波段纪要（会末版段纪要 scope='final'，见 final_pass）
+                    start_ms=seg["start_ms"],
+                    end_ms=seg["end_ms"],
                     window_text=seg["window_text"],
                     content=seg["content"],
                     ocr_text=ocr_text or "",
@@ -332,6 +336,8 @@ class BatchEnhancer:
             "final": final,
             "title": seg["title"],
             "points": points,
+            "start_ms": seg["start_ms"],  # 纪要↔转写联动定位
+            "end_ms": seg["end_ms"],
             "action_items": seg.get("action_items") or [],
             "attributes": [],
         })
@@ -381,15 +387,20 @@ class BatchEnhancer:
         return self.segments_text()
 
 
-async def _llm_enhance(ctx_summaries: list[str], prev_summary: str,
-                       prev_lines: list[tuple[str, str]],
-                       cur_lines: list[tuple[str, str]],
-                       ocr_text: str = "", *, meeting_id: str = "",
-                       scope: str = "live", seq: int = 0) -> dict | None:
-    """一波一次合并 LLM 调用。失败/超时返回 None（调用方记日志跳过，不重试不累积）。
+def _idx_rows(data: dict, key: str) -> list[dict]:
+    """lines / prev_corrections 都按显式行号 i 对齐（不依赖位置），
+    模型漏行只影响漏掉的那几行，不再整波失败。"""
+    rows = data.get(key) or []
+    return [d for d in rows if isinstance(d, dict) and isinstance(d.get("i"), int)]
+
+
+async def call_wave_llm(messages: list[dict], *, meeting_id: str = "",
+                        scope: str = "live", seq: int = 0) -> dict | None:
+    """波次 LLM 底层调用（会中串行波 / 会末并行波共用）。
 
     Langfuse 经 openai wrapper 自动埋点。超时 roll_llm_timeout_sec 秒即放弃。
     同时写 SummaryLlmLog：prompt、原始输出、耗时，供调试页看黑盒。
+    失败/超时返回 None（调用方记日志跳过，不重试不累积）。
     """
     import time
 
@@ -397,8 +408,6 @@ async def _llm_enhance(ctx_summaries: list[str], prev_summary: str,
     from app.db.models import SummaryLlmLog
     from app.llm import client as llm_client
 
-    messages = llm_client.build_enhance_messages(ctx_summaries, prev_summary,
-                                                 prev_lines, cur_lines, ocr_text=ocr_text)
     t0 = time.monotonic()
     await log_event(meeting_id, event_stages.LLM_WAVE_START,
                     scope=scope, seq=seq, model=settings.llm_model)
@@ -432,26 +441,35 @@ async def _llm_enhance(ctx_summaries: list[str], prev_summary: str,
                 logger.exception("SummaryLlmLog persist failed")
         await log_event(meeting_id, event_stages.LLM_WAVE_END,
                         scope=scope, seq=seq, duration_ms=duration_ms)
-        data = json.loads(raw)
-        # lines / prev_corrections 都按显式行号 i 对齐（不依赖位置），
-        # 模型漏行只影响漏掉的那几行，不再整波失败
-        def _idx_rows(key: str) -> list[dict]:
-            rows = data.get(key) or []
-            return [d for d in rows if isinstance(d, dict) and isinstance(d.get("i"), int)]
-
-        return {
-            "lines": _idx_rows("lines"),
-            "prev_corrections": _idx_rows("prev_corrections"),
-            "summary": str(data.get("summary", "")).strip(),
-            "title": str(data.get("title", "")).strip(),
-            "prev_summary": str(data.get("prev_summary", "")).strip(),
-            # 结构化待办（2026-09-28）：task/assignee/due/quote 四字段，经 client 归一化
-            "action_items": llm_client.parse_action_items(data.get("action_items")),
-        }
+        return json.loads(raw)
     except Exception as exc:
         duration_ms = int((time.monotonic() - t0) * 1000)
         await log_event(meeting_id, event_stages.LLM_WAVE_FAIL,
                         scope=scope, seq=seq, duration_ms=duration_ms,
                         error=str(exc)[:500])
-        logger.exception("llm enhance failed")
+        logger.exception("llm wave call failed")
         return None
+
+
+async def _llm_enhance(ctx_summaries: list[str], prev_summary: str,
+                       prev_lines: list[tuple[str, str]],
+                       cur_lines: list[tuple[str, str]],
+                       ocr_text: str = "", *, meeting_id: str = "",
+                       scope: str = "live", seq: int = 0) -> dict | None:
+    """一波一次合并 LLM 调用（会中串行波）。失败/超时返回 None。"""
+    from app.llm import client as llm_client
+
+    messages = llm_client.build_enhance_messages(ctx_summaries, prev_summary,
+                                                 prev_lines, cur_lines, ocr_text=ocr_text)
+    data = await call_wave_llm(messages, meeting_id=meeting_id, scope=scope, seq=seq)
+    if data is None:
+        return None
+    return {
+        "lines": _idx_rows(data, "lines"),
+        "prev_corrections": _idx_rows(data, "prev_corrections"),
+        "summary": str(data.get("summary", "")).strip(),
+        "title": str(data.get("title", "")).strip(),
+        "prev_summary": str(data.get("prev_summary", "")).strip(),
+        # 结构化待办（2026-09-28）：task/assignee/due/quote 四字段，经 client 归一化
+        "action_items": llm_client.parse_action_items(data.get("action_items")),
+    }

@@ -4,9 +4,9 @@ import json
 from pathlib import Path
 
 import numpy as np
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Body, HTTPException
 from fastapi.responses import FileResponse
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.config import settings
 from app.core.segment import merge_display_rows
@@ -30,6 +30,9 @@ async def get_config() -> dict:
         "visual_frame_interval_sec": settings.visual_frame_interval_sec,
         "visual_frame_width": settings.visual_frame_width,
         "visual_frame_quality": settings.visual_frame_quality,
+        # 视频持久化（2026-10-08）：MediaRecorder 落盘开关与码率，前端读这里
+        "video_record_enabled": settings.video_record_enabled,
+        "video_bits_per_second": settings.video_bits_per_second,
     }
 
 
@@ -37,6 +40,17 @@ async def get_config() -> dict:
 async def list_meetings(limit: int = 50) -> list[dict]:
     async with SessionLocal() as db:
         rows = (await db.execute(select(Meeting).order_by(Meeting.started_at.desc()).limit(limit))).scalars().all()
+        # 产物计数：失败/中断会议一眼可辨（0 句 0 段）
+        ids = [m.id for m in rows]
+        uc: dict[str, int] = {}
+        sc: dict[str, int] = {}
+        if ids:
+            uc = dict((await db.execute(
+                select(Utterance.meeting_id, func.count()).where(Utterance.meeting_id.in_(ids)).group_by(Utterance.meeting_id)
+            )).all())
+            sc = dict((await db.execute(
+                select(Summary.meeting_id, func.count()).where(Summary.meeting_id.in_(ids)).group_by(Summary.meeting_id)
+            )).all())
         return [
             {
                 "id": m.id,
@@ -48,6 +62,9 @@ async def list_meetings(limit: int = 50) -> list[dict]:
                 "attributes": json.loads(m.attributes or "[]"),
                 "tags": json.loads(m.tags or "[]"),
                 "reannotated": bool(m.reannotated),
+                "final_status": m.final_status or "",
+                "utterance_count": uc.get(m.id, 0),
+                "summary_count": sc.get(m.id, 0),
             }
             for m in rows
         ]
@@ -77,6 +94,7 @@ async def meeting_detail(meeting_id: str) -> dict:
             "attributes": json.loads(meeting.attributes or "[]"),
             "tags": json.loads(meeting.tags or "[]"),
             "reannotated": bool(meeting.reannotated),
+            "final_status": meeting.final_status or "",
             # 双版本架构（2026-09-28）：版本模式 / 采集来源 / 权威待办清单（会末版为准）
             "version_mode": meeting.version_mode,
             "source_mode": meeting.source_mode,
@@ -102,23 +120,26 @@ async def meeting_detail(meeting_id: str) -> dict:
 
 
 @router.post("/meetings/{meeting_id}/reannotate")
-async def meeting_reannotate(
-    meeting_id: str, name_threshold: float = 0
-) -> dict:
-    """手动触发会末重标注（历史会议补跑 / 失败重试）。
+async def meeting_reannotate(meeting_id: str) -> dict:
+    """手动完整重跑会末版（重标注 → 波次纪要 → 会末总结），后台执行。
 
-    name_threshold 在 (0,1) 时作为声纹匹配阈值，否则用 config 默认。
+    2026-10-01 起从「只重跑转写」升级为完整会末版：声纹注册后重跑才能同时刷新
+    段纪要/会末总结里的人名。进度/结果看 meeting.final_status（前端轮询）。
     """
-    from app.core.reannotate import reannotate_for_meeting
+    import asyncio
+
+    from app.core.final_pass import rerun_final_pass_standalone
 
     async with SessionLocal() as db:
-        if not await db.get(Meeting, meeting_id):
+        meeting = await db.get(Meeting, meeting_id)
+        if not meeting:
             raise HTTPException(404, "meeting not found")
-    thr = name_threshold if 0 < name_threshold < 1 else None
-    started = await reannotate_for_meeting(meeting_id, name_threshold=thr)
-    if not started:
+        if meeting.final_status == "running":
+            raise HTTPException(409, "会末版正在生成中，请勿重复触发")
+    if not (Path(settings.recordings_dir) / f"{meeting_id}.wav").is_file():
         raise HTTPException(404, "recording not found")
-    return {"ok": True, "meeting_id": meeting_id}
+    asyncio.create_task(rerun_final_pass_standalone(meeting_id))
+    return {"ok": True, "meeting_id": meeting_id, "started": True}
 
 
 # 视觉帧上行限制：单帧 200KB（base64 后 ~267KB），单请求 ≤ 6 帧
@@ -184,9 +205,9 @@ async def meeting_audio_denoised(meeting_id: str) -> FileResponse:
 
     def _build() -> None:
         import soundfile as sf
-        from app.core.preprocess import denoise_pcm
+        from app.core.preprocess import denoise_sync
         data, _sr = sf.read(str(src), dtype="int16")
-        out = denoise_pcm(data.tobytes())
+        out = denoise_sync(data.tobytes())
         cache_dir.mkdir(exist_ok=True)
         # 必须写标准 WAV 容器（裸 PCM 浏览器无法解码）
         sf.write(str(cache), np.frombuffer(out, dtype=np.int16), 16000, subtype="PCM_16")
@@ -211,6 +232,8 @@ async def meeting_summaries(meeting_id: str, scope: str | None = None) -> list[d
                 "scope": s.scope,
                 "title": s.title,
                 "content": s.content,
+                "start_ms": s.start_ms,
+                "end_ms": s.end_ms,
                 "action_items": json.loads(s.action_items or "[]"),
                 "attributes": json.loads(s.attributes or "[]"),
                 "created_at": s.created_at.isoformat() if s.created_at else None,
@@ -268,3 +291,57 @@ async def meeting_report(meeting_id: str) -> dict:
                 parts.append(f"- [ ] **{who}**：{what}（{due}）{status}")
 
         return {"id": meeting.id, "title": meeting.title, "markdown": "\n".join(parts)}
+
+
+# 视频持久化上传（2026-10-08）：前端 MediaRecorder 把整轨 webm 分片 POST 上来落盘
+_MAX_VIDEO_SEGMENT_BYTES = 64 * 1024 * 1024  # 单片 ≤64MB
+
+
+@router.post("/meetings/{meeting_id}/video_segment")
+async def meeting_video_segment(meeting_id: str, segment_index: int = 0,
+                                payload: bytes = Body(...)) -> dict:
+    """收会议视频分片（webm bytearray）。segment_index 从 0 递增，落盘为
+    recordings/_video/<meeting_id>/seg_<index>.webm；同时记 meeting.video_path。"""
+    async with SessionLocal() as db:
+        meeting = await db.get(Meeting, meeting_id)
+        if not meeting:
+            raise HTTPException(404, "meeting not found")
+    if not payload or len(payload) > _MAX_VIDEO_SEGMENT_BYTES:
+        raise HTTPException(400, "empty or too large segment")
+    out_dir = Path(settings.recordings_dir) / "_video" / meeting_id
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / f"seg_{segment_index:04d}.webm").write_bytes(payload)
+    async with SessionLocal() as db:
+        meeting = await db.get(Meeting, meeting_id)
+        if meeting:
+            meeting.video_path = str(
+                (out_dir / "playlist.m3u8").relative_to(Path(settings.recordings_dir).parent))
+            await db.commit()
+    return {"ok": True, "segment_index": segment_index, "bytes": len(payload)}
+
+
+@router.get("/meetings/{meeting_id}/video")
+async def meeting_video(meeting_id: str) -> FileResponse:
+    """整场视频回放（单文件模式）：segments 拼成一个 webm 返回。
+
+    分片模式下前端按 Range 逐个请求 /video_segment/<i>；为简单起见这里先支持
+    单文件（前端每次 stop 时 finalize 只留一个 seg_0000.webm），多片时按序拼接。
+    """
+    vdir = Path(settings.recordings_dir) / "_video" / meeting_id
+    if not vdir.is_dir():
+        raise HTTPException(404, "no video for this meeting")
+    segs = sorted(vdir.glob("seg_*.webm"))
+    if not segs:
+        raise HTTPException(404, "no video segments")
+    if len(segs) == 1:
+        return FileResponse(segs[0], media_type="video/webm", filename=f"{meeting_id}.webm")
+    # 多片：拼到缓存（一次拼接，后续直接复用）
+    import tempfile
+    cache = vdir / "_merged.webm"
+    if not cache.is_file():
+        with tempfile.NamedTemporaryFile(dir=vdir, delete=False) as tmp:
+            for s in segs:
+                tmp.write(s.read_bytes())
+            tmp_path = Path(tmp.name)
+        tmp_path.replace(cache)
+    return FileResponse(cache, media_type="video/webm", filename=f"{meeting_id}.webm")

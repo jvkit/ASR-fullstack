@@ -71,6 +71,12 @@ class Settings(BaseSettings):
     # preprocess.denoise_pcm；原始 PCM 存档不受影响，关闭即回到未降噪链路。
     denoise_enabled: bool = True
     denoise_model_path: str = "models/gtcrn_dns3.tar"  # 相对 server/ 目录
+    # 2026-09-30 本地 torch 退役：remote=GPU 服务器 /denoise（唯一生产路径）；
+    # local=本机 CPU torch（仅服务器不可用时的开发兜底）
+    denoise_mode: str = "remote"  # remote | local
+    denoise_remote_timeout_sec: float = 60.0
+    # /diarize_full（远端 3D-Speaker 整场分离）超时：38min 会议 RTF≈0.06 → 给足余量
+    diarize_full_timeout_sec: float = 600.0
 
     # 说话人认人阈值（会议中批次 + 会末重标注 + 手动重标注共用此一个旋钮；
     # 注册人真实匹配分落在 0.44~0.61。2026-09-15 由 0.30 收紧到 0.40：
@@ -78,16 +84,30 @@ class Settings(BaseSettings):
     # 混有远场弱质录音，过于普适，重录后有望再收）。DER 验证（AISHELL M会
     # 5min，replay_der 别名合并口径）：0.30→16.8% / 0.40→17.8%，混淆 4s→7s，
     # miss 不变 43s——收紧的代价在噪声内）
-    reannotate_name_threshold: float = 0.40
+    # 2026-09-29 基于 10 组实测数据（AISHELL M会 5min + 285639543705 B站视频 +
+    # 5abeb9f67b12 B站视频 + 67eca68d49fc 冯忠俊全程 + 自注册音频）矩阵评测：
+    # 0.40 误识别 4；0.50 误识别 3；0.50+margin>=0.15 误识别 1、漏识别 0、
+    # 正确 4。B 站视频男声 score=0.496 margin=0.186 被正确拒绝（score<0.50），
+    # 冯忠俊低分簇 0.548/0.251 保留。定档 0.50，余量 0.05 后续按日志再调。
+    reannotate_name_threshold: float = 0.50
+    # 声纹匹配 margin 下限（与 reannotate_name_threshold 双门槛）。
+    # 285639543705 实测 B 站视频男声 score=0.4046 margin=0.0909 被误标冯忠俊；
+    # AISHELL 001-M/002-M 被误标 006-F 时 margin 仅 0.03~0.09（低于 0.15），
+    # 真实注册人 margin 通常 >=0.25。margin<0.15 视为"两个都像"的模糊匹配，拒识。
+    pipeline_min_identify_margin: float = 0.15
     reannotate_min_sec: int = 10          # 短于此秒数不做重标注
 
     # ---------- 会末说话人分离：3D-Speaker（换芯一期 B，2026-09-20） ----------
-    # 唯一生产会末分离路径：会末完整录音 → 本地 GTCRN → diarize3ds.diarize 出匿名分段
+    # 唯一生产会末分离路径：会末完整录音 → GTCRN 降噪 → 3D-Speaker 出匿名分段
+    #（2026-09-30 起两者均在 GPU 服务器 /denoise、/diarize_full 完成，本机零 torch）
     # → GPU /identify_segments 逐段 ERes2NetV2 认人 + SeACo 转写。
     # 旧自研 VAD+匿名聚类（/meeting_chunk）不再作为会末生产路径，代码保留用于会中批次
     # 与回滚（见 AGENTS.md §5）。此处参数对应 3D-Speaker CommonClustering，默认值与
     # scd_bench 评测/等价性验收（rotate_m30 7.66%、M5min 4.77%）完全一致。
     diar3ds_cluster_type: str = "spectral"
+    # 嵌入选择（2026-10-10）：cam=CAM++（3D 原生）| ere=ERes2NetV2（与声纹库同
+    # 尺子，7444 实测 CAM++ 在同场两人场景簇内 cos 仅 0.64 分不开，ere 0.78~0.92）
+    diar3ds_emb: str = "cam"  # 2026-10-10: ere 路径刚上线有稳定性问题（37e3 分出 1 簇），先回退 cam 保底，修好再用
     diar3ds_mer_cos: float = 0.8          # 簇心 cos≥此值再合并
     diar3ds_min_num_spks: int = 1
     diar3ds_max_num_spks: int = 15        # 谱聚类选 k 上限（>15 人场景不可用）
@@ -116,6 +136,9 @@ class Settings(BaseSettings):
     # 用 120s 固定窗而非对齐 OCR/批次边界：固定窗简单可靠、VisualNote 按时间范围
     # 关联不需要边界对齐。
     final_wave_sec: float = 120.0
+    # 会末波次并发数（2026-10-01 冗余上下文模式：波间零依赖可全并行，
+    # 信号量限流防 LLM 端打爆；1 = 退回串行）
+    final_wave_parallel: int = 4
 
     # LLM（内网 vLLM / mymodule 网关）
     llm_base_url: str = "http://127.0.0.1:4000/v1"
@@ -169,6 +192,16 @@ class Settings(BaseSettings):
     visual_frame_interval_sec: float = 10.0   # 前端抽帧间隔（10s 甜点：写字/遮挡均覆盖）
     visual_frame_width: int = 960             # 前端缩略宽度（960 实测小字全可读；白板读不清再升 1280）
     visual_frame_quality: int = 80            # JPEG 质量
+    # 视频持久化（2026-10-08）：video 轨 MediaRecorder 整轨落盘（recordings/_video/<id>.webm），
+    # 供历史会议回看画面/认人；零轨（没开视频）时不启动
+    video_record_enabled: bool = True
+    video_bits_per_second: int = 1_000_000  # 1Mbps：PPT/人脸分享屏足够，一天 3h 会 ≈ 1.3GB
+    # 会末注册弹窗自动勾选（2026-10-09）：按"段 vs 簇质心"相似度降序累加，凑满即停
+    # （30s 后质心收益饱和，40s 留余量；改这里调默认勾选量）
+    enroll_auto_pick_sec: float = 40.0
+    # 段级标红阈值：段 vs 簇/质心相似度低于此值标红"疑似混入他人"（仅提示不拦截）
+    enroll_seg_warn_sim: float = 0.50
+    segments_sim_timeout_sec: float = 120.0
     visual_llm_model: str = "new"             # 多模态池（chat 池对图片请求报错，唯一可用 new）
     visual_llm_timeout_sec: int = 300         # 多帧读图分钟级，给足余量
     visual_prompt_app: str = "online"         # online | offline（提示词模板选择）

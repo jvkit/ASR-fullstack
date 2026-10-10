@@ -6,6 +6,9 @@
 - 原始 PCM 存档（server/recordings/）不受本层影响：降噪只作用于推理副本。
 - 开关在 config.denoise_enabled；模型路径 config.denoise_model_path。
 - GTCRN 对干净语音近透明（决赛验证），注册/识别同处理无阈值漂移之虞。
+
+2026-09-30 本地 torch 退役：denoise_mode=remote（默认）时降噪在 GPU 服务器
+/denoise 端点完成（同一实现同一权重），本机零 torch；local 仅作开发兜底。
 """
 import logging
 import os
@@ -16,6 +19,53 @@ import numpy as np
 from app.config import settings
 
 logger = logging.getLogger(__name__)
+
+
+async def denoise_async(pcm: bytes) -> bytes:
+    """异步统一入口：remote → GPU /denoise；local → 本机 torch（线程池，不堵事件循环）。
+    任何失败都回退原始音频（与历史版本同一兜底语义）。"""
+    if not settings.denoise_enabled:
+        return pcm
+    if settings.denoise_mode == "remote":
+        return await _denoise_remote(pcm)
+    import asyncio
+    return await asyncio.to_thread(denoise_pcm, pcm)
+
+
+async def _denoise_remote(pcm: bytes) -> bytes:
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=settings.denoise_remote_timeout_sec) as cli:
+            r = await cli.post(
+                f"{settings.diarize_http_url}/denoise",
+                files={"file": ("chunk.pcm", pcm, "application/octet-stream")},
+            )
+            r.raise_for_status()
+            # 防御：长度不一致说明对端异常，用原始音频
+            return r.content if len(r.content) == len(pcm) else pcm
+    except Exception:
+        logger.exception("remote denoise failed, 回退原始音频")
+        return pcm
+
+
+def denoise_sync(pcm: bytes) -> bytes:
+    """同步统一入口（仅线程池上下文用，如 /audio_denoised 的 run_in_threadpool）。"""
+    if not settings.denoise_enabled:
+        return pcm
+    if settings.denoise_mode == "remote":
+        try:
+            import httpx
+            r = httpx.post(
+                f"{settings.diarize_http_url}/denoise",
+                files={"file": ("chunk.pcm", pcm, "application/octet-stream")},
+                timeout=settings.denoise_remote_timeout_sec,
+            )
+            r.raise_for_status()
+            return r.content if len(r.content) == len(pcm) else pcm
+        except Exception:
+            logger.exception("remote denoise failed, 回退原始音频")
+            return pcm
+    return denoise_pcm(pcm)
 
 _lock = threading.Lock()
 _model = None

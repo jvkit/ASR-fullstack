@@ -1,10 +1,11 @@
 """会末重标注：3D-Speaker 分离 + GPU 认人/转写 → utterances_re 权威终版。
 
 换芯一期 B（2026-09-20）起唯一生产会末路径：
-    原始 PCM → preprocess.denoise_pcm（本地 GTCRN）→ diarize3ds.diarize（本地
-    FSMN VAD + CAM++ 嵌入 + 谱聚类，出匿名分段）→ GPU /identify_segments
+    原始 PCM → preprocess.denoise_async（远端 /denoise GTCRN）→ /diarize_full
+    （远端 3D-Speaker：FSMN VAD + CAM++ 嵌入 + 谱聚类，出匿名分段）→ /identify_segments
     （逐段 SeACo ASR[热词/标点/ITN] + 逐簇 ERes2NetV2 声纹库认人）
     → ReAnnotateUtterance 落库
+    （2026-09-30 起全部运算在 GPU 服务器，本机零 torch）
 
 旧路径（meeting_chunk 一体化自研 VAD+匿名聚类）不再被会末使用，代码保留于
 gpu_pipeline.meeting_chunk 供会中批次与回滚（见 AGENTS.md §5）。任一环节失败
@@ -52,13 +53,12 @@ async def reannotate(
             logger.info("reannotate skip %s: too short", meeting_id)
             return False
 
-        from app.core.diarize3ds import diarize
-        from app.core.gpu_pipeline import identify_segments
-        from app.core.preprocess import denoise_pcm
+        from app.core.gpu_pipeline import diarize_full, identify_segments
+        from app.core.preprocess import denoise_async
 
         await log_event(meeting_id, event_stages.DENOISE_START)
-        # 1) 本地 GTCRN 降噪（推理副本；原始存档不受影响）
-        pcm = denoise_pcm(pcm)
+        # 1) GTCRN 降噪（2026-09-30 起在 GPU 服务器 /denoise 完成；推理副本，原始存档不受影响）
+        pcm = await denoise_async(pcm)
         await log_event(meeting_id, event_stages.DENOISE_END,
                         duration_ms=len(pcm) // 32)
         # 降噪后整轨落盘（调试用）
@@ -70,8 +70,11 @@ async def reannotate(
                 await db.commit()
 
         await log_event(meeting_id, event_stages.DIAR_START)
-        # 2) 本地 3D-Speaker 分离（CPU，长会议分钟级）
-        segments = diarize(pcm, sr=16000)
+        # 2) 3D-Speaker 分离（2026-09-30 起远端 /diarize_full，本机零 torch）
+        segments = await diarize_full(pcm, timeout_sec=timeout_sec)
+        if segments is None:
+            logger.error("reannotate %s: diarize_full failed, final version aborted", meeting_id)
+            return False
         await log_event(meeting_id, event_stages.DIAR_END, segments=len(segments))
         logger.info("reannotate %s: 3ds diarize done, %d segs", meeting_id, len(segments))
         if not segments:
@@ -116,6 +119,8 @@ async def reannotate(
                     logger.exception("save final segment audio failed")
                     audio_path = None
 
+                score = float(s["score"]) if s.get("score") is not None else None
+                margin = float(s["margin"]) if s.get("margin") is not None else None
                 db.add(ReAnnotateUtterance(
                     meeting_id=meeting_id,
                     seq=i,
@@ -125,7 +130,8 @@ async def reannotate(
                     start_ms=start_ms,
                     end_ms=end_ms,
                     audio_path=audio_path,
-                    diar_score=float(s.get("score")) if s.get("score") is not None else None,
+                    diar_score=score,
+                    diar_margin=margin,
                 ))
                 db.add(DiarSegment(
                     meeting_id=meeting_id,
@@ -133,7 +139,8 @@ async def reannotate(
                     end_ms=end_ms,
                     cluster_label=str(s.get("cluster_id") or ""),
                     matched_speaker=display_speaker(s.get("speaker") or "", keep_anon=True),
-                    score=float(s.get("score")) if s.get("score") is not None else None,
+                    score=score,
+                    diar_margin=margin,
                     audio_path=audio_path,
                     source="final",
                 ))

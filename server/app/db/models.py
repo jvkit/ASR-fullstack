@@ -14,6 +14,14 @@ class Base(DeclarativeBase):
     pass
 
 
+# 用户未起标题时的占位值：AI 提炼的标题只允许覆盖这些，用户手填的标题永不覆盖
+DEFAULT_TITLES = ("", "未命名会议")
+
+
+def title_is_default(t: str | None) -> bool:
+    return (t or "").strip() in DEFAULT_TITLES
+
+
 # -----------------------------------------------------------------------------
 # 基础业务表
 # -----------------------------------------------------------------------------
@@ -26,16 +34,20 @@ class Meeting(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True)  # uuid
     title: Mapped[str] = mapped_column(String(200), default="未命名会议")
     recorder: Mapped[str] = mapped_column(String(64), default="")  # 采集人标识（弃用，兼容保留）
-    status: Mapped[str] = mapped_column(String(16), default="live")  # live | ended
+    status: Mapped[str] = mapped_column(String(16), default="live")  # live | ended | interrupted
     started_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
     ended_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     # 结束时 AI 全文提取的事实性属性：JSON list[{"key","value"}]
-    attributes: Mapped[str] = mapped_column(Text, default='""')
+    attributes: Mapped[str] = mapped_column(Text, default='[]')
     # 结束时 AI 归纳的会议标签：JSON list[str]
-    tags: Mapped[str] = mapped_column(Text, default='"[]"')
-    # 会末重标注是否完成
+    tags: Mapped[str] = mapped_column(Text, default='[]')
+    # 会末重标注是否完成（仅转写重跑；会末版全流程是否完成看 final_status）
     reannotated: Mapped[bool] = mapped_column(default=False)
+    # 会末版全流程状态（2026-10-01）：''=未跑/无会末版 | running=生成中 | done=已出 | failed=失败
+    # reannotated 在重标注落库后即置 True，波次纪要/会末总结失败时它也是 True，
+    # 「终版已出」必须以本字段为准（否则显示已出其实没好）
+    final_status: Mapped[str] = mapped_column(String(12), default="")
     # 双版本架构：live=只会中实时版 | final=只会末版 | both=两版都出
     version_mode: Mapped[str] = mapped_column(String(8), default="both")
     # 采集来源：mic=现场麦克风 | online=线上会议
@@ -46,6 +58,8 @@ class Meeting(Base):
     # 调试/审计：整轨录音路径
     audio_raw_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
     audio_denoised_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    # 整轨视频（webm）路径（2026-10-08 起持久化，无视频为 NULL）
+    video_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
 
 
 class Utterance(Base):
@@ -66,13 +80,14 @@ class Utterance(Base):
     start_ms: Mapped[int] = mapped_column(Integer, default=0)
     end_ms: Mapped[int] = mapped_column(Integer, default=0)
     # FunASR offline 字级时间戳 JSON：[[char, start_ms, end_ms], ...]
-    char_timestamps: Mapped[str] = mapped_column(Text, default='"[]"')
+    char_timestamps: Mapped[str] = mapped_column(Text, default='[]')
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
 
     # 调试/审计
     source: Mapped[str] = mapped_column(String(16), default="live")  # live | final | manual
     audio_path: Mapped[str | None] = mapped_column(String(500), nullable=True)  # 该段音频文件
     diar_score: Mapped[float | None] = mapped_column(Float, nullable=True)      # 声纹匹配分
+    diar_margin: Mapped[float | None] = mapped_column(Float, nullable=True)     # 声纹匹配领先第二名幅度
 
 
 class ReAnnotateUtterance(Base):
@@ -93,6 +108,7 @@ class ReAnnotateUtterance(Base):
 
     audio_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
     diar_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    diar_margin: Mapped[float | None] = mapped_column(Float, nullable=True)
 
 
 class Summary(Base):
@@ -104,11 +120,14 @@ class Summary(Base):
     meeting_id: Mapped[str] = mapped_column(String(36), index=True)
     seq: Mapped[int] = mapped_column(Integer)  # 第几次总结
     scope: Mapped[str] = mapped_column(String(8), default="live")  # live | final
+    # 本波覆盖的转写时间范围（终版 seq=0 为 0）：前端「纪要↔转写」联动定位用
+    start_ms: Mapped[int] = mapped_column(Integer, default=0)
+    end_ms: Mapped[int] = mapped_column(Integer, default=0)
     window_text: Mapped[str] = mapped_column(Text, default="")  # 本窗口送入的原文
     ocr_text: Mapped[str | None] = mapped_column(Text, nullable=True)  # 本波注入的 OCR 文本
     content: Mapped[str] = mapped_column(Text, default="")      # 总结正文
-    action_items: Mapped[str] = mapped_column(Text, default='"[]"')  # JSON list
-    attributes: Mapped[str] = mapped_column(Text, default='"[]"')    # JSON list
+    action_items: Mapped[str] = mapped_column(Text, default='[]')  # JSON list
+    attributes: Mapped[str] = mapped_column(Text, default='[]')    # JSON list
     title: Mapped[str] = mapped_column(String(200), default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
 
@@ -123,7 +142,7 @@ class VisualNote(Base):
     start_ms: Mapped[int] = mapped_column(Integer, default=0)  # 帧组首帧时间
     end_ms: Mapped[int] = mapped_column(Integer, default=0)    # 帧组末帧时间
     text: Mapped[str] = mapped_column(Text, default="")        # OCR markdown 记录
-    frame_paths: Mapped[str] = mapped_column(Text, default='"[]"')  # JSON list[相对路径]
+    frame_paths: Mapped[str] = mapped_column(Text, default='[]')  # JSON list[相对路径]
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
 
 
@@ -147,6 +166,7 @@ class DiarSegment(Base):
     cluster_label: Mapped[str] = mapped_column(String(32), default="")   # 聚类标签，如 spk0
     matched_speaker: Mapped[str] = mapped_column(String(64), default="") # 声纹匹配后的人名
     score: Mapped[float | None] = mapped_column(Float, nullable=True)    # 匹配分
+    diar_margin: Mapped[float | None] = mapped_column(Float, nullable=True)  # 领先第二名幅度
     audio_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
     source: Mapped[str] = mapped_column(String(16), default="final")     # final | live
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
@@ -176,5 +196,5 @@ class MeetingEvent(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     meeting_id: Mapped[str] = mapped_column(String(36), index=True)
     stage: Mapped[str] = mapped_column(String(32))  # 见 server/app/db/event_stages.py
-    detail: Mapped[str] = mapped_column(Text, default='"{}"')  # JSON dict
+    detail: Mapped[str] = mapped_column(Text, default='{}')  # JSON dict
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)

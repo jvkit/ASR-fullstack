@@ -1,9 +1,6 @@
-import Vant from 'vant'
-import 'vant/lib/index.css'
-import ElementPlus from 'element-plus'
-import 'element-plus/dist/index.css'
 import { createApp } from 'vue'
 
 import App from './App.vue'
+import './styles/tokens.css'
 
-createApp(App).use(ElementPlus).use(Vant).mount('#app')
+createApp(App).mount('#app')

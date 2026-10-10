@@ -57,3 +57,7 @@ server/models/
 # 仓库根 scripts 杂项
 scripts/wavs/
 scripts/__pycache__/
+
+# 2026-10-10：评测大文件与备份不入库
+eval/7444af8235c2/
+backups/

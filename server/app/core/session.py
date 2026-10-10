@@ -34,7 +34,7 @@ from app.core.segment import UtteranceBuffer
 from app.db import event_stages
 from app.db.database import SessionLocal
 from app.db.events import log_event
-from app.db.models import DiarSegment, Meeting, Summary, Utterance
+from app.db.models import DiarSegment, Meeting, Summary, Utterance, title_is_default
 from app.llm import client as llm_client
 
 logger = logging.getLogger(__name__)
@@ -101,6 +101,9 @@ class MeetingSession:
         self._chunk_failures = 0       # /meeting_chunk 连续失败次数
         self._batch_loop_task: asyncio.Task | None = None
         self._visual_timer_task: asyncio.Task | None = None  # final-only 模式视觉 OCR 节拍
+        # live 收尾与会末版并行（2026-10-01 gather）时，meeting 元信息（标题/标签/属性/待办）
+        # 的读-改-写竞争锁：两边都是 merge 语义 + 同一把锁，先后提交都收敛
+        self._meta_lock = asyncio.Lock()
         # 热词（FunASR 按空白切分；全局词库 + 本场配置弹窗追加，逗号格式转空格）
         _hw = f"{load_hotwords()},{hotwords_extra}" if hotwords_extra.strip() else load_hotwords()
         self._hotwords = _hw.replace(",", " ")
@@ -190,19 +193,32 @@ class MeetingSession:
         """会末收尾（后台，2026-09-28 起模式感知）：live → 尾巴批 flush + 实时段纪要
         归约终版（scope='live'）；final → 全场重跑 + 会末波次 + 会末最终总结
         （见 final_pass.run_final_pass）。两版独立管道互不纠正，各自独立 try，
-        一边失败不影响另一边。失败仅记日志。"""
+        一边失败不影响另一边。失败仅记日志。
+        2026-10-01 起两路 gather 并行（互不依赖，省下 live 收尾的串行等待）；
+        meeting 元信息写入由 self._meta_lock + merge 语义保证并发收敛。"""
         session_id = self.meeting_id
-        if self.version_mode in ("live", "both"):
+
+        async def _live() -> None:
             try:
                 await self._finalize_live(session_id)
             except Exception:
                 logger.exception("meeting %s live finalize failed", session_id)
-        if self.version_mode in ("final", "both"):
+
+        async def _final() -> None:
+            from app.core.final_pass import _set_final_status, run_final_pass
             try:
-                from app.core.final_pass import run_final_pass
                 await run_final_pass(self)
             except Exception:
                 logger.exception("meeting %s final pass failed", session_id)
+                await _set_final_status(session_id, "failed")
+
+        tasks = []
+        if self.version_mode in ("live", "both"):
+            tasks.append(_live())
+        if self.version_mode in ("final", "both"):
+            tasks.append(_final())
+        if tasks:
+            await asyncio.gather(*tasks)
 
     async def _finalize_live(self, session_id: str) -> None:
         """实时版终版：flush 尾巴批 → enhancer.finish() → 段纪要归约出标题/总结/标签/属性。
@@ -242,16 +258,24 @@ class MeetingSession:
         # 结构化待办（2026-09-28）：LLM 输出的 action_items 已按 quote 去重
         live_actions = llm_client.dedup_action_items(result.get("action_items") or [])
 
-        async with SessionLocal() as db:
+        async with self._meta_lock, SessionLocal() as db:
             meeting = await db.get(Meeting, session_id)
             if meeting:
-                if final_title:
+                # 用户手填的标题永不覆盖；只有默认占位标题才允许 AI 提炼覆盖
+                if final_title and title_is_default(meeting.title):
                     meeting.title = final_title
                 if final_tags:
                     meeting.tags = json.dumps(final_tags, ensure_ascii=False)
                 if merged:
+                    # merge 语义（与会末版 gather 并行不丢 key）：live 优先，同 key 覆盖
+                    existing = {
+                        str(kv["key"]): str(kv.get("value", ""))
+                        for kv in json.loads(meeting.attributes or "[]")
+                        if isinstance(kv, dict) and kv.get("key")
+                    }
+                    existing.update(merged)
                     meeting.attributes = json.dumps(
-                        [{"key": k, "value": v} for k, v in merged.items()],
+                        [{"key": k, "value": v} for k, v in existing.items()],
                         ensure_ascii=False,
                     )
                 # live-only 时这就是权威待办；final/both 由会末版覆盖（用户拍板）
@@ -396,8 +420,8 @@ class MeetingSession:
 
         chunk = pcm[:int(cut_ms * 32)]
         await log_event(self.meeting_id, event_stages.DENOISE_START)
-        from app.core.preprocess import denoise_pcm
-        denoised_chunk = denoise_pcm(chunk)
+        from app.core.preprocess import denoise_async
+        denoised_chunk = await denoise_async(chunk)
         await log_event(self.meeting_id, event_stages.DENOISE_END,
                         chunk_ms=int(cut_ms))
         await log_event(self.meeting_id, event_stages.DIAR_START,
@@ -432,7 +456,27 @@ class MeetingSession:
                 continue  # 空段不展示（碎段已在 GPU 侧参与打标/修剪）
             start_ms = int(base_ms + float(s["start"]) * 1000)
             end_ms = int(base_ms + float(s["end"]) * 1000)
-            spk = display_speaker(s.get("speaker") or "")
+            raw_spk = s.get("speaker") or ""
+            score = float(s["score"]) if s.get("score") is not None else None
+            margin = float(s["margin"]) if s.get("margin") is not None else None
+            # 声纹压线误匹配过滤（2026-09-29）：score 刚过阈值但 margin 极小，
+            # 说明是"两个都不太像但稍微像一点"，强制降级未识别，避免 B 站视频男声
+            # 被标成冯忠俊（285639543705 实测 score=0.4046 margin=0.0909）。
+            if (
+                score is not None
+                and margin is not None
+                and score >= settings.reannotate_name_threshold
+                and margin < settings.pipeline_min_identify_margin
+                and raw_spk not in ("未识别",)
+                and not raw_spk.startswith("说话人")
+            ):
+                logger.info(
+                    "meeting %s reject low-margin match: %s score=%.3f margin=%.3f < %.3f",
+                    self.meeting_id, raw_spk, score, margin,
+                    settings.pipeline_min_identify_margin,
+                )
+                raw_spk = "未识别"
+            spk = display_speaker(raw_spk)
             item = await self.buffer.add(spk, text, start_ms, end_ms)
             async with SessionLocal() as db:
                 db.add(Utterance(
@@ -445,7 +489,8 @@ class MeetingSession:
                     end_ms=item.end_ms,
                     char_timestamps="[]",
                     source="live",
-                    diar_score=float(s.get("score")) if s.get("score") is not None else None,
+                    diar_score=score,
+                    diar_margin=margin,
                 ))
                 db.add(DiarSegment(
                     meeting_id=self.meeting_id,
@@ -453,7 +498,8 @@ class MeetingSession:
                     end_ms=end_ms,
                     cluster_label=str(s.get("cluster_id") or ""),
                     matched_speaker=spk,
-                    score=float(s.get("score")) if s.get("score") is not None else None,
+                    score=score,
+                    diar_margin=margin,
                     source="live",
                 ))
                 await db.commit()

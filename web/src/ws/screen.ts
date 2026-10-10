@@ -114,3 +114,81 @@ export class ScreenFrameCapture {
     this.ctx = null
   }
 }
+
+
+/** 视频持久化（2026-10-08）：把 video 轨整轨 MediaRecorder 成 webm 分片落盘。
+ * 与 ScreenFrameCapture 共用同一 display stream；Recorder 只握 video 轨（音频侧
+ * MicRecorder 独立走 PCM 上行，互不干扰）。配置从 /api/config 读（不硬编码）。 */
+export class ScreenVideoRecorder {
+  private recorder: MediaRecorder | null = null
+  private meetingId = ''
+  private segIndex = 0
+  private bitsPerSecond = 1_000_000
+  private enabled = true
+
+  /** 从 display stream 的 video 轨启动录制；无 video 轨静默跳过。 */
+  start(displayStream: MediaStream, meetingId: string): void {
+    this.meetingId = meetingId
+    this.segIndex = 0
+    fetch('/api/config')
+      .then((r) => r.json())
+      .then((c) => {
+        this.enabled = c.video_record_enabled !== false
+        this.bitsPerSecond = c.video_bits_per_second ?? 1_000_000
+        if (!this.enabled) return
+        const track = displayStream.getVideoTracks()[0]
+        if (!track) return  // 没开视频：不启动，不算错误
+        try {
+          this.recorder = new MediaRecorder(new MediaStream([track]), {
+            mimeType: 'video/webm;codecs=vp9',
+            videoBitsPerSecond: this.bitsPerSecond,
+          })
+        } catch {
+          try {
+            this.recorder = new MediaRecorder(new MediaStream([track]), {
+              mimeType: 'video/webm',
+              videoBitsPerSecond: this.bitsPerSecond,
+            })
+          } catch {
+            return // 浏览器不支持：静默降级（有抽帧兜底）
+          }
+        }
+        // 每 ~30s 出一分片上传，避免单片过大内存压力；stop 时 finalize 尾片
+        this.recorder.ondataavailable = (e) => {
+          if (e.data && e.data.size > 0) void this._upload(e.data)
+        }
+        this.recorder.start(30_000)
+      })
+      .catch(() => {})
+  }
+
+  private async _upload(blob: Blob): Promise<void> {
+    const idx = this.segIndex++
+    try {
+      const buf = await blob.arrayBuffer()
+      await fetch(`/api/meetings/${this.meetingId}/video_segment?segment_index=${idx}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/octet-stream' },
+        body: buf,
+      })
+    } catch {
+      // 上传失败静默：后续分片继续，丢一片不阻塞（与抽帧丢帧同一策略）
+    }
+  }
+
+  /** 结束录制并上传尾片。 */
+  async stop(): Promise<void> {
+    const rec = this.recorder
+    this.recorder = null
+    if (!rec || rec.state === 'inactive') return
+    await new Promise<void>((resolve) => {
+      rec.onstop = () => resolve()
+      try {
+        rec.stop()
+      } catch {
+        resolve()
+      }
+    })
+    // 最后一片在 ondataavailable 里已触发上传（小会议只有这一片）
+  }
+}

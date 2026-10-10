@@ -1,0 +1,369 @@
+diff --git a/runtime/python/websocket/funasr_wss_server.py b/runtime/python/websocket/funasr_wss_server.py
+index 2a449e6..f4cf2bb 100644
+--- a/runtime/python/websocket/funasr_wss_server.py
++++ b/runtime/python/websocket/funasr_wss_server.py
+@@ -118,6 +118,12 @@ parser.add_argument("--concurrent_asr_online", type=int, default=4, help="Max co
+ parser.add_argument("--concurrent_asr_offline", type=int, default=2, help="Max concurrent offline ASR generate() calls.")
+ parser.add_argument("--concurrent_punc", type=int, default=1, help="Max concurrent punctuation generate() calls.")
+ parser.add_argument("--concurrent_sv", type=int, default=1, help="Max concurrent speaker verification generate() calls.")
++parser.add_argument(
++    "--speaker_match_threshold",
++    type=float,
++    default=0.45,
++    help="Min cosine similarity to accept a registered speaker match; below this, fall back to anonymous clustering.",
++)
+ parser.add_argument(
+     "--speaker_db_reload_sec",
+     type=int,
+@@ -155,6 +161,31 @@ def _safe_int(v, default):
+         return default
+ 
+ 
++def _apply_tuning_params(websocket, messagejson):
++    """应用说话人/VAD 动态参数（独立于 audio_fs，配置无 audio_fs 也生效）。"""
++    if "spk_threshold" in messagejson:
++        try:
++            websocket.spk_threshold = float(messagejson["spk_threshold"])
++        except (TypeError, ValueError):
++            pass
++    if "speaker_match_threshold" in messagejson:
++        try:
++            websocket.speaker_match_threshold = float(messagejson["speaker_match_threshold"])
++        except (TypeError, ValueError):
++            pass
++    for _k, _attr, _typ in (
++        ("vad_max_end_silence_ms", "vad_max_end_silence_ms", int),
++        ("vad_max_segment_sec", "vad_max_segment_sec", int),
++        ("spk_min_seg_sec", "spk_min_seg_sec", float),
++        ("max_speakers", "max_speakers", int),
++    ):
++        if _k in messagejson:
++            try:
++                setattr(websocket, _attr, _typ(messagejson[_k]))
++            except (TypeError, ValueError):
++                pass
++
++
+ # ========= speaker db：加缓存，避免每段都读盘 =========
+ _SPEAKER_DB_CACHE = {}
+ _SPEAKER_DB_CACHE_TS = 0.0
+@@ -235,8 +266,7 @@ from funasr import AutoModel  # noqa
+ 
+ # ====== 离线 ASR ======
+ model_asr = AutoModel(
+-    model="paraformer-zh",
+-    model_revision="v2.0.4",
++    model="/home/bo1/.cache/modelscope/models/iic--speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-pytorch/snapshots/master",
+     ngpu=args.ngpu,
+     ncpu=args.ncpu,
+     device=args.device,
+@@ -282,7 +312,8 @@ else:
+ 
+ # sv
+ model_sv = AutoModel(
+-    model="iic/speech_campplus_sv_zh-cn_16k-common",
++    model="iic/speech_eres2netv2_sv_zh-cn_16k-common",
++    init_param="/home/bo1/.cache/modelscope/models/iic--speech_eres2netv2_sv_zh-cn_16k-common/snapshots/master/pretrained_eres2netv2.ckpt",
+     ngpu=args.ngpu,
+     device=args.device,
+     disable_pbar=True,
+@@ -350,13 +381,14 @@ async def ws_serve(websocket, path=None):
+     global websocket_users
+     websocket_users.add(websocket)
+ 
+-    websocket.status_dict_asr = {}  # hotword 等
++    websocket.status_dict_asr = {"output_timestamp": True}  # hotword 等；output_timestamp: offline 结果带逐字时间戳
+     websocket.status_dict_asr_online = {"cache": {}, "is_final": False}
+     websocket.status_dict_vad = {"cache": {}, "is_final": False}
+     websocket.status_dict_punc = {"cache": {}}
+ 
+     websocket.chunk_interval = 10
+     websocket.vad_pre_idx = 0
++    websocket.total_audio_ms = 0  # [patch] 累计接收音频毫秒（会话级，不重置），用于绝对时间戳偏移
+     speech_start = False
+     speech_end_i = -1
+     online_needs_finalization = False
+@@ -364,6 +396,19 @@ async def ws_serve(websocket, path=None):
+ 
+     websocket.wav_name = "microphone"
+     websocket.mode = "2pass"
++    # 匿名说话人聚类状态（会话级），[(embedding ndarray, count)]，按顺序即 说话人1/2/...
++    websocket.spk_centroids = []
++    websocket.spk_threshold = 0.55  # 默认聚类阈值，可被客户端配置覆盖
++    websocket.speaker_match_threshold = args.speaker_match_threshold  # 注册声纹匹配阈值，可被客户端配置覆盖
++    # 激进切分参数（可被客户端配置消息覆盖）：
++    # 静音多久判"说完"（ms）——原模型 800，降到 350 后正常换气即可断句
++    websocket.vad_max_end_silence_ms = 350
++    # 单段最长秒数——原模型 60s，超长段必然混进多个说话人，强制切断
++    websocket.vad_max_segment_sec = 8
++    # 短于此秒数的段不做声纹（碎段 embedding 不稳，标"发言人"即可）
++    websocket.spk_min_seg_sec = 1.0
++    # 匿名聚类人数上限（0=不限制；>0 时达到上限强制并入最相近簇）
++    websocket.max_speakers = 0
+     websocket.is_speaking = True  # ✅ 默认初始化，避免 AttributeError
+ 
+     # 保存离线片段
+@@ -471,6 +516,15 @@ async def ws_serve(websocket, path=None):
+ 
+                 print("=============messagejson============", messagejson)
+ 
++                # 声纹管理短连接：enroll / speaker_list / speaker_delete，不走 ASR 管线
++                _ctrl_mode = messagejson.get("mode")
++                if _ctrl_mode in ("enroll", "speaker_list", "speaker_delete"):
++                    try:
++                        await handle_speaker_ctrl(websocket, messagejson)
++                    finally:
++                        websocket_users.discard(websocket)
++                    return
++
+                 end_of_input = False
+                 if "is_speaking" in messagejson:
+                     websocket.is_speaking = bool(messagejson["is_speaking"])
+@@ -517,6 +571,9 @@ async def ws_serve(websocket, path=None):
+ 
+                 if "audio_fs" in messagejson:
+                     websocket.audio_fs = _safe_int(messagejson["audio_fs"], 16000)
++                    _apply_tuning_params(websocket, messagejson)
++
++                _apply_tuning_params(websocket, messagejson)
+ 
+                 if end_of_input:
+                     await finish_input(send_end_ack=bool(messagejson.get("is_end")))
+@@ -548,6 +605,7 @@ async def ws_serve(websocket, path=None):
+ 
+             duration_ms = _pcm_duration_ms(pcm, fs=websocket.audio_fs, ch=1, sampwidth=2)
+             websocket.vad_pre_idx += duration_ms
++            websocket.total_audio_ms += duration_ms  # [patch]
+ 
+             # online asr
+             frames_asr_online.append(pcm)
+@@ -590,6 +648,14 @@ async def ws_serve(websocket, path=None):
+             if (speech_end_i != -1) or (not websocket.is_speaking):
+                 await finalize_online_segment()
+ 
++                # 修复：offline 分段触发后重置 vad 状态机，否则后续 speech_start 不再置位，
++                # 整场会话只有第一段会被转写。保留最近 20 帧做 priming，让 vad
++                # 从"说话尾→静默"过渡开始检测下一句。
++                if websocket.mode in ("2pass", "offline") and (speech_end_i != -1 or not websocket.is_speaking):
++                    websocket.status_dict_vad["cache"] = {}
++                    websocket.vad_pre_idx = 0
++                    frames = frames[-20:]
++
+                 if websocket.mode in ("2pass", "offline"):
+                     audio_in = b"".join(frames_asr)
+                     if not audio_in and speech_end_i != -1:
+@@ -658,7 +724,12 @@ async def ws_serve(websocket, path=None):
+ 
+ async def async_vad(websocket, audio_in: bytes):
+     # model_vad.generate 是阻塞的，必须 offload
+-    out = await run_blocking(_generate_sync, model_vad, audio_in, websocket.status_dict_vad, sem=SEM_VAD)
++    # 激进切分参数：max_end_silence_time 支持 kwargs 覆盖；
++    # max_single_segment_time 只能从 vad_opts 改（全局对象，同值并发安全）
++    model_vad.model.vad_opts.max_single_segment_time = int(getattr(websocket, "vad_max_segment_sec", 8)) * 1000
++    _vad_kwargs = dict(websocket.status_dict_vad)
++    _vad_kwargs["max_end_silence_time"] = int(getattr(websocket, "vad_max_end_silence_ms", 350))
++    out = await run_blocking(_generate_sync, model_vad, audio_in, _vad_kwargs, sem=SEM_VAD)
+     segments_result = out[0].get("value", [])
+ 
+     speech_start = -1
+@@ -673,16 +744,24 @@ async def async_vad(websocket, audio_in: bytes):
+     return speech_start, speech_end
+ 
+ 
+-def _sv_and_match_sync(audio_in: bytes, reload_sec: int):
++CLUSTER_SIM_THRESHOLD = 0.55  # ERes2NetV2 同人 cosine 阈值，低于此判新人
++
++
++def _sv_and_match_sync(audio_in: bytes, reload_sec: int, ws_conn=None):
+     """
+     同步执行：SV embedding + speaker_db 匹配
+     返回 (spk_name, best_score)
++
++    匿名聚类：speaker_db 未命中（或为空）时，对当前连接做会话内在线聚类，
++    按出现顺序输出 说话人1 / 说话人2 / ...
+     """
+     spk_name = "unknown"
+     best_score = 0.0
+ 
+     sv_out = model_sv.generate(input=audio_in, embedding=True)[0]
+     embedding = sv_out["spk_embedding"][0].cpu().numpy()
++    # [patch] 归一化后再比：scipy cosine 对未归一化向量失真（cos_sim 被系统性拉低）
++    embedding = embedding / (np.linalg.norm(embedding) + 1e-9)
+ 
+     now_ts = time.time()
+     local_speaker_db = get_speaker_db_cached(now_ts, reload_sec=reload_sec)
+@@ -691,15 +770,128 @@ def _sv_and_match_sync(audio_in: bytes, reload_sec: int):
+             if ref_embedding is None:
+                 continue
+             arr = np.array(ref_embedding, dtype=np.float32)
++            arr = arr / (np.linalg.norm(arr) + 1e-9)
+             similarity = 1.0 - cosine(embedding, arr)
+             print("sv similarity with {}: {}".format(name, similarity))
+-            if similarity > best_score and similarity > 0.2:
++            if similarity > best_score and similarity > getattr(ws_conn, "speaker_match_threshold", args.speaker_match_threshold):
+                 best_score = similarity
+                 spk_name = name
+ 
++    # 未注册命中 → 会话内匿名聚类
++    if spk_name == "unknown" and ws_conn is not None:
++        centroids = getattr(ws_conn, "spk_centroids", None)
++        if centroids is not None:
++            best_idx, best_sim = -1, -1.0
++            for i, (c, n) in enumerate(centroids):
++                # [patch] 质心也归一化后比较（滑动平均后范数漂移 <1 会失真）
++                c_n = c / (np.linalg.norm(c) + 1e-9)
++                sim = 1.0 - cosine(embedding, c_n)
++                if sim > best_sim:
++                    best_idx, best_sim = i, sim
++            cluster_thr = getattr(ws_conn, "spk_threshold", CLUSTER_SIM_THRESHOLD)
++            if best_idx >= 0 and best_sim >= cluster_thr:
++                c, n = centroids[best_idx]
++                new_c = (c * n + embedding) / (n + 1)  # 滑动平均质心
++                new_c = new_c / (np.linalg.norm(new_c) + 1e-9)  # [patch] 重新归一化
++                centroids[best_idx] = (new_c, n + 1)
++                spk_name = "说话人{}".format(best_idx + 1)
++                best_score = float(best_sim)
++            else:
++                max_spk = int(getattr(ws_conn, "max_speakers", 0) or 0)
++                if max_spk > 0 and len(centroids) >= max_spk and best_idx >= 0:
++                    # 人数已达上限：不再新建，强制并入最相近簇（宁混不裂）
++                    c, n = centroids[best_idx]
++                    new_c = (c * n + embedding) / (n + 1)
++                    new_c = new_c / (np.linalg.norm(new_c) + 1e-9)  # [patch] 重新归一化
++                    centroids[best_idx] = (new_c, n + 1)
++                    spk_name = "说话人{}".format(best_idx + 1)
++                    best_score = float(best_sim)
++                else:
++                    centroids.append((embedding.copy(), 1))
++                    spk_name = "说话人{}".format(len(centroids))
++                    best_score = float(best_sim if best_idx >= 0 else 0.0)
++
+     return spk_name, float(best_score)
+ 
+ 
++async def handle_speaker_ctrl(websocket, first_msg):
++    """声纹管理短连接：enroll 收 PCM 算 embedding 入库；list/delete 即时回复。"""
++    ctrl_mode = first_msg.get("mode")
++    spk_name = str(first_msg.get("spk_name") or "").strip()
++    try:
++        if ctrl_mode == "speaker_list":
++            db = _load_speaker_db_sync()
++            await websocket.send(json.dumps(
++                {"mode": "speaker_list_result", "speakers": sorted(db.keys())},
++                ensure_ascii=False))
++            return
++        if ctrl_mode == "speaker_delete":
++            if not spk_name:
++                raise ValueError("spk_name required")
++            db = _load_speaker_db_sync()
++            removed = db.pop(spk_name, None) is not None
++            tmp_path = SPEAKER_DB_PATH + ".tmp"
++            with open(tmp_path, "w", encoding="utf-8") as f:
++                json.dump(db, f, ensure_ascii=False)
++            os.replace(tmp_path, SPEAKER_DB_PATH)
++            await websocket.send(json.dumps(
++                {"mode": "speaker_delete_result", "ok": True,
++                 "removed": removed, "speakers": sorted(db.keys())},
++                ensure_ascii=False))
++            return
++        # enroll：持续收二进制 PCM，直到 is_speaking=false / enroll_finish
++        if not spk_name:
++            raise ValueError("spk_name required")
++        pcm_chunks = []
++        async for message in websocket:
++            if isinstance(message, (bytes, bytearray)):
++                pcm_chunks.append(bytes(message))
++                continue
++            try:
++                mj = json.loads(message)
++            except Exception:
++                continue
++            if mj.get("is_speaking") is False or mj.get("enroll_finish"):
++                break
++        audio = b"".join(pcm_chunks)
++        if len(audio) < 16000 * 2 * 3:
++            raise ValueError("enroll audio too short: {:.1f}s < 3s".format(len(audio) / 32000))
++        # 留存原始注册音频：换声纹模型/复核时可直接重算 embedding
++        try:
++            enroll_dir = os.path.join(os.path.dirname(SPEAKER_DB_PATH), "speaker_enrolls")
++            os.makedirs(enroll_dir, exist_ok=True)
++            with open(os.path.join(enroll_dir, "{}_{}.pcm".format(
++                    spk_name, int(time.time()))), "wb") as f:
++                f.write(audio)
++        except Exception as _e:
++            print("enroll audio save failed: {}".format(_e), flush=True)
++        sv_out = model_sv.generate(input=audio, embedding=True)[0]
++        emb = sv_out["spk_embedding"][0].cpu().numpy()
++        # [patch] 归一化后入库：否则 scipy cosine(1-cos_sim) 对未归一化向量失真，
++        # 导致相似度被系统性拉低（0.1~0.33），匹配永远失败/随机命中
++        emb = emb / (np.linalg.norm(emb) + 1e-9)
++        emb = emb.tolist()
++        db = _load_speaker_db_sync()
++        db[spk_name] = emb
++        tmp_path = SPEAKER_DB_PATH + ".tmp"
++        with open(tmp_path, "w", encoding="utf-8") as f:
++            json.dump(db, f, ensure_ascii=False)
++        os.replace(tmp_path, SPEAKER_DB_PATH)
++        print("speaker enrolled: {} (total {})".format(spk_name, len(db)), flush=True)
++        await websocket.send(json.dumps(
++            {"mode": "enroll_result", "ok": True,
++             "spk_name": spk_name, "speakers": sorted(db.keys())},
++            ensure_ascii=False))
++    except Exception as e:
++        print("speaker ctrl failed: {}".format(e), flush=True)
++        try:
++            await websocket.send(json.dumps(
++                {"mode": "{}_result".format(ctrl_mode), "ok": False, "error": str(e)},
++                ensure_ascii=False))
++        except Exception:
++            pass
++
++
+ async def async_asr(websocket, audio_in: bytes):
+     mode = "2pass-offline" if "2pass" in (websocket.mode or "") else websocket.mode
+ 
+@@ -730,18 +922,35 @@ async def async_asr(websocket, audio_in: bytes):
+     timestamp = rec_result.get("timestamp", None)
+     sentence_info = rec_result.get("sentence_info", None)
+ 
++    # [patch] 本段音频在整个会话中的绝对起始毫秒（16kHz/16bit/mono = 32 B/ms）
++    _seg_start_ms = max(0, getattr(websocket, "total_audio_ms", 0) - len(audio_in) // 32)
++    if timestamp is not None:
++        timestamp = [[int(s) + _seg_start_ms, int(e) + _seg_start_ms] for s, e in timestamp]
++    if sentence_info is not None:
++        for _si in sentence_info:
++            if "start" in _si:
++                _si["start"] = int(_si["start"]) + _seg_start_ms
++            if "end" in _si:
++                _si["end"] = int(_si["end"]) + _seg_start_ms
++
+     # 2) 声纹识别（阻塞，线程池执行）
+     spk_name = "unknown"
+     best_score = 0.0
+-    try:
+-        spk_name, best_score = await run_blocking(
+-            _sv_and_match_sync,
+-            audio_in,
+-            int(args.speaker_db_reload_sec),
+-            sem=SEM_SV,
+-        )
+-    except Exception as e:
+-        print(f"声纹识别失败: {e}")
++    _seg_sec = len(audio_in) / 32000.0
++    if _seg_sec < float(getattr(websocket, "spk_min_seg_sec", 1.0)):
++        # 碎段不做声纹：embedding 不稳，匹配/聚类都不可信，留空由前端显示"发言人"
++        pass
++    else:
++        try:
++            spk_name, best_score = await run_blocking(
++                _sv_and_match_sync,
++                audio_in,
++                int(args.speaker_db_reload_sec),
++                sem=SEM_SV,
++                ws_conn=websocket,
++            )
++        except Exception as e:
++            print(f"声纹识别失败: {e}")
+ 
+     # 3) 标点（阻塞，线程池执行）
+     punc_array = None

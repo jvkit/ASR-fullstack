@@ -118,3 +118,12 @@ def build_enhance_messages(ctx_summaries: list[str], prev_summary: str,
     return prompts.build_enhance_messages(ctx_summaries, prev_summary, prev_lines,
                                           cur_lines, ocr_text=ocr_text)
 
+
+
+def build_final_wave_messages(before_lines: list[tuple[str, str]],
+                              cur_lines: list[tuple[str, str]],
+                              after_lines: list[tuple[str, str]],
+                              ocr_text: str = "") -> list[dict]:
+    """会末版并行波（冗余上下文模式）的提示词构造，见 prompts.build_final_wave_messages。"""
+    return prompts.build_final_wave_messages(before_lines, cur_lines, after_lines,
+                                             ocr_text=ocr_text)

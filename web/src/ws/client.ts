@@ -4,7 +4,7 @@ export type ServerMessage =
   | { type: 'started'; meeting_id: string }
   | { type: 'transcript'; seq: number; speaker: string; text: string; start_ms: number; end_ms: number }
   | { type: 'transcript_update'; seq: number; speaker: string; text: string; start_ms: number; end_ms: number; corrected?: boolean }
-  | { type: 'summary'; seq: number; scope?: string; final: boolean; title: string; points: string[]; action_items: unknown[]; attributes: unknown[] }
+  | { type: 'summary'; seq: number; scope?: string; final: boolean; title: string; points: string[]; action_items: unknown[]; attributes: unknown[]; start_ms?: number; end_ms?: number }
   | { type: 'attributes'; title: string; attributes: { key: string; value: string }[] }
   | { type: 'ended'; meeting_id: string }
   | { type: 'reannotated'; meeting_id: string }
