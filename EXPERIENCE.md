@@ -1,36 +1,54 @@
-# ASR-fullstack 经验
+# 最近工作总结（2026-10-12）
 
-## 架构
-- 本地全栈：FastAPI 后端 :8010 + Vue3 前端 :5174（https 自签）
-- MySQL docker 容器 `mysql`，重启后先 `docker start mysql`
-- GPU 服务器 `ssh gpu`（172.16.16.120），diarize_svc :10096 承担所有重运算
-- 启动：`bash scripts/start_all.sh restart`
-- LLM 网关 `http://127.0.0.1:4000/v1`，key `sk-Dg178ahJjKa6gOUa096`，现在只剩 model='chat'（多模态）
+## 今天干了什么
 
-## 双版本管道（互不纠正）
-- **实时版**：30s 批次 → 本地降噪 → 本地 3D-Speaker 聚类 → GPU identify_segments → 并行波次 LLM
-- **会末版**：全场降噪 → GPU /diarize_full 聚类 → /identify_segments 认人 → 并行波次 → 会末总结
+### 1. 会中模式核对
+- 确认会中（实时版）已经走 3D-Speaker，不是自研聚类
+- 链路：本地降噪 → 本地 3D-Speaker 聚类 → GPU /identify_segments 声纹认人+ASR
 
-## 踩坑
-1. GPU 服务可能无故死掉，症状是 httpx.ConnectError，检查 10096 端口，down 就重启
-2. 批量 HTTP 脚本别在后台跑（shell 包装 + pipe head 会 SIGPIPE 卡死），要前台跑或 setsid nohup 无 pipe
-3. `/speaker_identify` 要求 ≥3s 语音，短段被拒
-4. `file://` 下 fetch 本地 JSON 被禁，需内嵌 HTML
-5. 用户电脑弱，禁止本地跑 torch/模型；用户喜欢"先对齐再开做"、不拍脑袋自研
+### 2. 手机 mic 录音质量分析（05b49d64b786）
+- 没有 WebRTC 掉块断流（任意 15ms-10s 能量断口 = 0）
+- 真正问题：响度忽大忽小（1s 窗 rms std 16.1dB，是最好场的 2 倍多）
+- 前 3.5 分钟散布 5 个 1.0-1.4s 绝对全零洞（疑似手机 AGC 或 Chrome tab 挂起）
+- 这种电平不稳会拉低声纹分数，不宜直接注册声纹
 
-## 已知问题
-1. **簇级 argmax 在混合簇上系统性出错**：cluster 3 91 段 93% 是李炳晨，簇级却标成刘恒。段投票（每段 vs 声纹库 argmax，多数决）更鲁棒
-2. **单质心算术平均毁跨设备声纹**：线上/线下 embedding 平均后落在两簇中间空白地带，自相关分数大降。multi-vector（每段一个代表，匹配取 max）有效（刘恒 min 0.768→0.915，蒋泽鹏 0.667→0.734）
-3. **会末版 /diarize_full 对长音频不稳定**，可能服务崩掉
-4. **OCR model 'new' 池已下线**，用 'chat'（实测支持图片）
-5. **手机 mic 录音响度忽大忽小**（1s 窗 rms std 16.1dB），声纹分数被拉低，不宜直接注册
+### 3. 声纹库容量调研
+- 检索行业资料：VoxWatch（AWS）开集声纹 benchmark 证明"库内人越多，陌生人分数右移，误识率上升"是公认难题
+- 我们当前 13 人远在舒适区内，不用担心规模
+- 决定误识的是段质量和阈值，不是人数
 
-## 关键配置
-- `reannotate_name_threshold = 0.50`
-- `merge_thr = 0.55`（实时版）
-- `mer_cos = 0.8`（簇合并）
-- `min_cluster_size = 4`
+### 4. 线上/线下声纹不识别问题（核心）
+- **根因**：GPU `_load_db_multi()` 把每人所有注册段 embedding **算术平均成单质心**
+- 线上/线下 embedding 是两个簇，强行平均 → 向量落在中间空白地带 → 自相关分数大降
+- **验证**：新增 `/enroll_debug` 只读端点，对比单质心 vs multi-vector
+  - 刘恒：min 0.768 → 0.915（+0.147）
+  - 蒋泽鹏：min 0.667 → 0.734（+0.067）
+  - 冯忠俊（同质旧批次）：微降 0.01，无害
+- **结论**：multi-vector（每段一个代表，匹配取 max）有效，**但还没进生产**
 
-## 数据
-- 声纹库 13 人：何鑫、冯忠俊、刘恒、彭赛威、李炳晨、李迪、王建龙、王旭东、王翊冰、符龙、蒋泽鹏、郭静雯、陈俊荣、镇宇
-- 注册声纹 cross 相似度：刘恒↔李炳晨 0.32-0.47（正常间隔），冯忠俊↔蒋泽鹏 0.85（近邻对）
+### 5. 9d26278 会末版灾难诊断（李炳晨→刘恒）
+- 用户重跑会末，大量本该李炳晨的段被标成刘恒
+- **排查过程**：
+  1. 先怀疑声纹库污染 → 验证刘恒↔李炳晨 cross 相似度 0.32-0.47，**无污染**
+  2. 用降噪版音频复现 → 确认生产结果（李炳晨 133 段）
+  3. 用原始版音频跑 → 结果完全不同（cluster 3 19/20 是刘恒）
+  4. 1 分钟本机测试 → cluster 0 段投票 2/4 是李炳晨
+- **根因**：**簇级 argmax 的时长加权平均被长段主导，混合簇上系统性出错**
+- **用户拍板**：改段投票（每段 vs 声纹库 argmax，多数决），但还没实现
+
+### 6. 视频落盘检查
+- 代码链路完整（前端 MediaRecorder 分片 → 后端写盘）
+- 但今天三场都是 mic 模式，没开视频，所以没视频文件——预期行为
+
+### 7. 代码上传
+- 创建 GitHub 仓库：
+  - `ASR-fullstack`：本地全栈（meeting-asr）
+  - `ASR-service`：GPU 服务器 diarize_svc
+- ASR-service 已上传（含 EXPERIENCE.md）
+- ASR-fullstack 遇到 pack 超 2GB，大文件（eval 数据集、video、debug 音频）需要清理，**还没完成**
+
+## 待办
+1. **改 GPU /identify_segments**：簇级 argmax → 段投票（治李炳晨→刘恒）
+2. **上 multi-vector**：替换单质心（治跨设备不识别）
+3. **清理 ASR-fullstack 大文件**：eval/aishell4、video/spike、scd_bench、server/data/debug、audio_denoise/checkpoints
+4. 用户随时可能再开 mic 会议测试两人/三人聚类——注意 cam 路径、ere 勿开
