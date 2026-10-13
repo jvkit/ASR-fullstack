@@ -67,3 +67,5 @@ server/data/debug/*/segments/
 server/data/debug/*_splits/
 # 调试原始音频（raw/denoised wav）不入库（2026-10-12）
 server/data/debug/*/*.wav
+# 调试帧截图（visual frames）不入库（2026-10-13）
+server/data/

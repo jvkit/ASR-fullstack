@@ -27,6 +27,8 @@ export const icons: Record<string, string> = {
   close: '<path d="M6 6l12 12M18 6L6 18"/>',
   // 展开
   chevronDown: '<path d="M6 9.5l6 6 6-6"/>',
+  // 收起（分组折叠）
+  chevronRight: '<path d="M9.5 6l6 6-6 6"/>',
   // 对勾
   check: '<path d="M4.5 12.5l5 5L19.5 7"/>',
   // 警告

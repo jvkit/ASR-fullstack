@@ -12,6 +12,7 @@ from app.config import settings
 from app.core.segment import merge_display_rows
 from app.db.database import SessionLocal
 from app.db.models import Meeting, ReAnnotateUtterance, Summary, Utterance
+from app.llm.client import normalize_summary_text
 
 router = APIRouter(prefix="/api", tags=["meetings"])
 
@@ -231,7 +232,7 @@ async def meeting_summaries(meeting_id: str, scope: str | None = None) -> list[d
                 "seq": s.seq,
                 "scope": s.scope,
                 "title": s.title,
-                "content": s.content,
+                "content": normalize_summary_text(s.content),
                 "start_ms": s.start_ms,
                 "end_ms": s.end_ms,
                 "action_items": json.loads(s.action_items or "[]"),
@@ -278,17 +279,25 @@ async def meeting_report(meeting_id: str) -> dict:
             # seq=0 是会末终版（排在最前，先总结后分章）；1..N 是各波段纪要
             heading = "最终总结" if s.seq == 0 else f"{s.seq}. {s.title or f'第 {s.seq} 段'}"
             parts.append(f"## {heading}\n")
-            parts.append(s.content + "\n")
+            parts.append(normalize_summary_text(s.content) + "\n")
             all_actions.extend(json.loads(s.action_items or "[]"))
 
         if all_actions:
             parts.append("## 待办汇总\n")
+            # 按人分组导出（同前端待办卡片分组口径 2026-10-13）；未指派归"其它"
+            grouped: dict[str, list[dict]] = {}
             for a in all_actions:
-                who = a.get("who", "?")
-                what = a.get("what", "")
-                due = a.get("due", "")
-                status = a.get("status", "")
-                parts.append(f"- [ ] **{who}**：{what}（{due}）{status}")
+                who = str(a.get("assignee") or a.get("who") or "").strip() or "其它"
+                grouped.setdefault(who, []).append(a)
+            for who in sorted(grouped.keys(), key=lambda x: (x == "其它", x)):
+                parts.append(f"### {who}\n")
+                for a in grouped[who]:
+                    what = str(a.get("task") or a.get("what") or "").strip()
+                    due = str(a.get("due") or "").strip()
+                    status = str(a.get("status") or "").strip()
+                    due_txt = f"（{due}）" if due else ""
+                    parts.append(f"- [ ] {what}{due_txt}{status}")
+                parts.append("")
 
         return {"id": meeting.id, "title": meeting.title, "markdown": "\n".join(parts)}
 

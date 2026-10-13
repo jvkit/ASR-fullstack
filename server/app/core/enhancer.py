@@ -255,7 +255,7 @@ class BatchEnhancer:
             await self._broadcast_segment(self._segments[-1], final=False)
 
         # 本波段纪要：append 落库 + 广播
-        summary = (result.get("summary") or "").strip()
+        summary = llm_client.normalize_summary_text(result.get("summary") or "")
         if summary:
             self.summary_seq += 1
             seg = {

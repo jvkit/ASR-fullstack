@@ -66,6 +66,14 @@ const heroSummary = computed(() =>
     : liveSummaries.value.find((s) => s.seq === 0) || finalSummaries.value.find((s) => s.seq === 0)
   ),
 )
+// 终版总结要点：content 已是「· 开头、每行一条」的多行字符串，按行拆成列表渲染
+// （2026-10-13：后端 normalize_summary_text 已剥 list 字面量，这里只负责分行）
+const heroPoints = computed(() =>
+  (heroSummary.value?.content || '')
+    .split('\n')
+    .map((l) => l.trim().replace(/^·\s*/, ''))
+    .filter(Boolean),
+)
 const scopeUtterances = computed(() => (scope.value === 'final' ? reSegs.value : utterances.value))
 // 版本卡片产物计数
 const liveSegCount = computed(() => liveSummaries.value.filter((s) => s.seq >= 1).length)
@@ -159,6 +167,28 @@ function normActions(list: unknown): ActionItem[] {
       quote: String(a.quote || '').trim(),
     }))
     .filter((a) => a.task || a.quote)
+}
+
+// ---------- 待办分组（按人，未指派归"其它"；组可折叠展开，2026-10-13） ----------
+interface TodoGroup { name: string; items: ActionItem[] }
+const collapsedGroups = ref<Record<string, boolean>>({})
+const todoGroups = computed<TodoGroup[]>(() => {
+  const m = new Map<string, ActionItem[]>()
+  for (const a of actionItems.value) {
+    const name = a.assignee || '其它'
+    if (!m.has(name)) m.set(name, [])
+    m.get(name)!.push(a)
+  }
+  return [...m.entries()]
+    .map(([name, items]) => ({ name, items }))
+    .sort((x, y) => (x.name === '其它' ? 1 : y.name === '其它' ? -1 : y.items.length - x.items.length))
+})
+function toggleGroup(name: string) {
+  collapsedGroups.value[name] = !collapsedGroups.value[name]
+}
+function groupCollapsed(name: string): boolean {
+  // 默认全部折叠：长会议只扫各组待办数，点开目标组再看内容（2026-10-13 用户痛点"翻很久"）
+  return collapsedGroups.value[name] ?? true
 }
 
 // ---------- 纪要对照：左栏转写（波次虚线分隔）+ 右栏纪要卡纵向对齐 ----------
@@ -498,20 +528,34 @@ async function downloadMarkdown() {
             {{ heroSummary.scope === 'final' ? '会末最终总结' : '实时版终版' }}
           </div>
           <div class="hero-title">{{ heroSummary.title || '最终总结' }}</div>
-          <div class="hero-content" v-html="heroSummary.content"></div>
+          <ul v-if="heroPoints.length" class="hero-points">
+            <li v-for="(p, i) in heroPoints" :key="i">{{ p }}</li>
+          </ul>
         </div>
 
-        <!-- 待办汇总 -->
+        <!-- 待办汇总：按人分组 + 折叠展开（长会议不必从头翻到尾） -->
         <div v-if="actionItems.length" class="card todo-card">
-          <div class="block-title"><AppIcon name="todo" :size="15" /> 待办汇总</div>
-          <div class="todo-list">
-            <div v-for="(a, i) in actionItems" :key="i" class="todo-item">
-              <div class="todo-task">{{ a.task || '（未命名任务）' }}</div>
-              <div class="todo-meta">
-                <span v-if="a.assignee" class="chip chip-accent">负责人：{{ a.assignee }}</span>
-                <span v-if="a.due" class="chip chip-amber">截止：{{ a.due }}</span>
+          <div class="block-title">
+            <AppIcon name="todo" :size="15" /> 待办汇总
+            <span class="todo-count">（{{ actionItems.length }} 条 · {{ todoGroups.length }} 组）</span>
+          </div>
+          <div class="todo-groups">
+            <div v-for="g in todoGroups" :key="g.name" class="todo-group">
+              <button class="group-head" @click="toggleGroup(g.name)">
+                <AppIcon :name="groupCollapsed(g.name) ? 'chevronRight' : 'chevronDown'" :size="13" />
+                <span class="group-name">{{ g.name }}</span>
+                <span class="group-count">{{ g.items.length }}</span>
+              </button>
+              <div v-show="!groupCollapsed(g.name)" class="todo-list">
+                <div v-for="(a, i) in g.items" :key="i" class="todo-item">
+                  <div class="todo-task">{{ a.task || '（未命名任务）' }}</div>
+                  <div class="todo-meta">
+                    <span v-if="a.assignee" class="chip chip-accent">负责人：{{ a.assignee }}</span>
+                    <span v-if="a.due" class="chip chip-amber">截止：{{ a.due }}</span>
+                  </div>
+                  <div v-if="a.quote" class="todo-quote">出处：{{ a.quote }}</div>
+                </div>
               </div>
-              <div v-if="a.quote" class="todo-quote">出处：{{ a.quote }}</div>
             </div>
           </div>
         </div>
@@ -815,12 +859,36 @@ async function downloadMarkdown() {
 /* 待办汇总 */
 .todo-card { padding: 14px 18px; }
 .block-title { display: flex; align-items: center; gap: 6px; font-size: 14px; font-weight: 600; margin-bottom: 10px; }
-.todo-list { display: flex; flex-direction: column; gap: 12px; }
+.todo-count { font-size: 12px; font-weight: 400; color: var(--text-3); }
+.todo-groups { display: flex; flex-direction: column; gap: 4px; }
+.todo-group { border: 1px solid var(--border); border-radius: var(--radius-ctl); overflow: hidden; }
+.group-head {
+  display: flex; align-items: center; gap: 6px; width: 100%;
+  padding: 8px 12px; background: #f7f8fa; border: none; cursor: pointer;
+  font-size: 13px; font-weight: 600; color: var(--text-2); text-align: left;
+  transition: background 0.15s ease-out;
+}
+.group-head:hover { background: var(--accent-soft); color: var(--accent); }
+.group-name { flex: 1; }
+.group-count {
+  min-width: 20px; padding: 1px 7px; border-radius: 10px;
+  background: var(--border); color: var(--text-3); font-size: 11.5px; font-weight: 600;
+  text-align: center;
+}
+.todo-list { display: flex; flex-direction: column; gap: 12px; padding: 10px 12px; }
 .todo-item { padding-bottom: 12px; border-bottom: 1px solid var(--border); }
 .todo-item:last-child { padding-bottom: 0; border-bottom: none; }
 .todo-task { font-size: 14px; font-weight: 500; }
 .todo-meta { margin-top: 5px; display: flex; flex-wrap: wrap; gap: 5px; }
 .todo-quote { margin-top: 5px; font-size: 12px; color: var(--text-3); word-break: break-word; }
+
+/* 终版总结要点列表（2026-10-13：替代原 v-html 一坨，按行渲染） */
+.hero-points {
+  margin: 0; padding-left: 18px;
+  font-size: 14px; color: var(--text-2); line-height: 1.85;
+}
+.hero-points li { margin-bottom: 4px; }
+.hero-points li::marker { color: var(--accent); }
 
 /* 转写句子 */
 .utt {

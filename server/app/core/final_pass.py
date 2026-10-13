@@ -193,7 +193,7 @@ async def run_final_pass(session: MeetingSession) -> bool:
                 await db.commit()
 
         # 本波段纪要：append 落库 + 广播（seq 1..N，scope='final' 与实时版区分）
-        summary = (result.get("summary") or "").strip()
+        summary = llm_client.normalize_summary_text(result.get("summary") or "")
         actions = result.get("action_items") or []
         all_actions.extend(actions)
         if summary:
@@ -228,7 +228,7 @@ async def run_final_pass(session: MeetingSession) -> bool:
             and "重放测试" not in final_title:
         final_title = f"{final_title}（重放测试）"
     # LLM 失败兜底：直接用段纪要拼接当总结（信息全在，只是没归约）
-    final_summary = result["summary"] or segments_text
+    final_summary = llm_client.normalize_summary_text(result["summary"]) or segments_text
     final_tags = result["tags"][:settings.final_tags_count]
 
     if final_summary:

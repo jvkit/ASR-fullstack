@@ -65,7 +65,7 @@ async def extract_final_attributes(segments_text: str) -> dict:
         data = json.loads(raw)
         return {
             "title": str(data.get("title", "")),
-            "summary": str(data.get("summary", "")),
+            "summary": normalize_summary_text(data.get("summary", "")),
             "tags": [str(t) for t in data.get("tags", [])],
             "attributes": data.get("attributes", []),
             "action_items": parse_action_items(data.get("action_items")),
@@ -73,6 +73,38 @@ async def extract_final_attributes(segments_text: str) -> dict:
     except Exception:
         logger.exception("extract_final_attributes failed")
         return {"title": "", "summary": "", "tags": [], "attributes": [], "action_items": []}
+
+
+def normalize_summary_text(raw: object) -> str:
+    """LLM summary 归一化：LLM 有时返回多行字符串，有时返回 Python list 字面量
+    （如 "['· a','· b']"）。统一剥壳成以 · 开头、每行一条要点的多行字符串，
+    前端按行渲染要点列表，不再出现 `['· xxx','· yyy']` 一坨（2026-10-13 截图 bug）。
+    """
+    if isinstance(raw, list):
+        parts = [str(x) for x in raw]
+    else:
+        s = str(raw).strip()
+        if s.startswith("[") and s.endswith("]"):
+            try:
+                import ast as _ast
+                parsed = _ast.literal_eval(s)
+                parts = [str(x) for x in parsed] if isinstance(parsed, list) else [s]
+            except Exception:
+                parts = [s]
+        else:
+            parts = [s]
+    # 逐条清理引号/逗号残渣，确保 · 开头，过滤空行
+    cleaned: list[str] = []
+    for p in parts:
+        p = str(p).strip().strip(",")
+        if not p:
+            continue
+        # list 字面量残留的引号在 ast.literal_eval 已剥；纯字符串场景可能带首尾引号
+        p = p.strip('"').strip("'").strip()
+        if not p:
+            continue
+        cleaned.append(p if p.startswith("·") else f"· {p.lstrip('-•* ')}")
+    return "\n".join(cleaned)
 
 
 def parse_action_items(raw: object) -> list[dict]:
